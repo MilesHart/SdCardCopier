@@ -364,9 +364,12 @@ class Program
         var detected = DjiMetadataReader.DetectFromFile(filePath);
         Console.WriteLine($"File: {filePath}");
         Console.WriteLine($"Detected: {detected.GetDisplayName()} ({detected.GetFolderName()})");
-        if (detected == DeviceType.Unknown)
+        var dim = VideoDimensionReader.GetDimensions(filePath);
+        if (dim != null)
         {
-            Console.WriteLine("No pb_file:dvtm_* marker found. Try searching the file for 'dvtm_' or 'pb_file'.");
+            Console.WriteLine($"Video dimensions: {dim.Value.Width} x {dim.Value.Height}");
+            if (VideoDimensionReader.Is640x480(filePath))
+                Console.WriteLine("  -> 640x480 (SkyZone DVR)");
         }
     }
 

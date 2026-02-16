@@ -32,10 +32,13 @@ public class DeviceDetector
         {
             result.HasDcimFolder = true;
             result.DeviceType = AnalyzeDcimFolder(dcimPath, result);
+            // SkyZone cards can have DCIM too (e.g. DCIM\100\*.MOV at 640x480) – confirm before treating as Generic
+            if (result.DeviceType == DeviceType.Unknown || result.DeviceType == DeviceType.Generic)
+                TryConfirmSkyZone(result);
         }
         else
         {
-            // Check for SkyZone DVR files in root (they often put MOV files directly)
+            // No DCIM: check for SkyZone DVR (root or VIDEO folder)
             result.DeviceType = CheckForSkyZoneDvr(result);
         }
 
@@ -49,6 +52,8 @@ public class DeviceDetector
         if (result.DeviceType == DeviceType.Unknown)
         {
             result.DeviceType = GatherGenericMediaAndDetect(result);
+            if (result.DeviceType == DeviceType.Generic)
+                TryConfirmSkyZone(result);
         }
 
         return result;
@@ -420,7 +425,7 @@ public class DeviceDetector
     {
         try
         {
-            // SkyZone goggles save MOV files with H264 encoding
+            // SkyZone goggles save MOV files with H264 encoding at 640x480
             // They typically save directly to root or a simple VIDEO folder
             var movFiles = Directory.GetFiles(_rootPath, "*.MOV", SearchOption.TopDirectoryOnly);
             
@@ -432,17 +437,12 @@ public class DeviceDetector
                     result.FoundPatterns.Add($"MOV file in root: {fileName}");
                     result.MediaFiles.Add(file);
                 }
-                
-                // Check for typical SkyZone naming pattern (often timestamp-based)
+                if (Has640x480Video(result.MediaFiles))
+                    result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
                 if (movFiles.Any(f => Regex.IsMatch(Path.GetFileName(f), @"^\d{8}_\d{6}\.MOV$", RegexOptions.IgnoreCase) ||
                                       Regex.IsMatch(Path.GetFileName(f), @"^VID_\d+\.MOV$", RegexOptions.IgnoreCase) ||
                                       Regex.IsMatch(Path.GetFileName(f), @"^\d+\.MOV$", RegexOptions.IgnoreCase)))
-                {
                     result.FoundPatterns.Add("SkyZone-style filename pattern detected");
-                    return DeviceType.SkyZoneAnalog;
-                }
-                
-                // If we have MOV files but no DCIM, likely SkyZone
                 return DeviceType.SkyZoneAnalog;
             }
 
@@ -455,10 +455,12 @@ public class DeviceDetector
                     result.FoundPatterns.Add($"AVI file in root: {Path.GetFileName(file)}");
                     result.MediaFiles.Add(file);
                 }
+                if (Has640x480Video(result.MediaFiles))
+                    result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
                 return DeviceType.SkyZoneAnalog;
             }
 
-            // Check VIDEO folder
+            // Check VIDEO folder (SkyZone directory structure)
             var videoPath = Path.Combine(_rootPath, "VIDEO");
             if (Directory.Exists(videoPath))
             {
@@ -471,6 +473,8 @@ public class DeviceDetector
                 {
                     result.FoundPatterns.Add("VIDEO folder with recordings found");
                     result.MediaFiles.AddRange(videoFiles);
+                    if (Has640x480Video(result.MediaFiles))
+                        result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
                     return DeviceType.SkyZoneAnalog;
                 }
             }
@@ -481,6 +485,19 @@ public class DeviceDetector
         }
         
         return DeviceType.Unknown;
+    }
+
+    /// <summary>True if any MOV/MP4/AVI in the list is 640x480 (SkyZone goggle DVR resolution).</summary>
+    private static bool Has640x480Video(List<string> mediaFiles)
+    {
+        foreach (var path in mediaFiles)
+        {
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext is not ".mov" and not ".mp4" and not ".m4v" and not ".avi") continue;
+            if (VideoDimensionReader.Is640x480(path))
+                return true;
+        }
+        return false;
     }
 
     private DeviceType CheckForMiscPatterns(DeviceDetectionResult result)
@@ -584,6 +601,12 @@ public class DeviceDetector
             if (mediaFiles.Count > 0)
             {
                 result.MediaFiles.AddRange(mediaFiles);
+                // SkyZone: directory structure (VIDEO or MOV/AVI in root) + 640x480 => GoggleSZ
+                if (HasSkyZoneLikeStructure() && Has640x480Video(result.MediaFiles))
+                {
+                    result.FoundPatterns.Add("VIDEO/root MOV structure + 640x480 (SkyZone DVR)");
+                    return DeviceType.SkyZoneAnalog;
+                }
                 result.FoundPatterns.Add($"Generic detection: {mediaFiles.Count} media files found");
                 return DeviceType.Generic;
             }
@@ -594,6 +617,34 @@ public class DeviceDetector
         }
 
         return DeviceType.Unknown;
+    }
+
+    /// <summary>SkyZone layout: VIDEO folder, or MOV/AVI in root, or MOV/AVI under DCIM.</summary>
+    private bool HasSkyZoneLikeStructure()
+    {
+        if (Directory.Exists(Path.Combine(_rootPath, "VIDEO"))) return true;
+        if (Directory.GetFiles(_rootPath, "*.MOV", SearchOption.TopDirectoryOnly).Length > 0) return true;
+        if (Directory.GetFiles(_rootPath, "*.AVI", SearchOption.TopDirectoryOnly).Length > 0) return true;
+        var dcimPath = Path.Combine(_rootPath, "DCIM");
+        if (Directory.Exists(dcimPath))
+        {
+            foreach (var f in Directory.GetFiles(dcimPath, "*.*", SearchOption.AllDirectories))
+            {
+                var ext = Path.GetExtension(f).ToLowerInvariant();
+                if (ext == ".mov" || ext == ".avi") return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>When we have Generic/Unknown but structure + 640x480 match SkyZone, set GoggleSZ.</summary>
+    private void TryConfirmSkyZone(DeviceDetectionResult result)
+    {
+        if (result.MediaFiles.Count == 0) return;
+        if (!HasSkyZoneLikeStructure()) return;
+        if (!Has640x480Video(result.MediaFiles)) return;
+        result.DeviceType = DeviceType.SkyZoneAnalog;
+        result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
     }
 }
 

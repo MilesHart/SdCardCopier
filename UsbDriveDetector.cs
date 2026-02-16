@@ -50,9 +50,32 @@ public static class UsbDriveDetector
         }
 
         // Fallback: all removable drives (USB SD adapters typically report as Removable)
-        return DriveInfo.GetDrives()
+        var removable = DriveInfo.GetDrives()
             .Where(d => d.IsReady && d.DriveType == DriveType.Removable)
-            .Select(d => d.RootDirectory.FullName);
+            .Select(d => d.RootDirectory.FullName)
+            .ToList();
+        if (removable.Count > 0)
+            return removable;
+
+        // Some SD readers (e.g. built-in or SkyZone card in reader) report as Fixed.
+        // Include Fixed drives that look like camera cards (have DCIM or VIDEO or .MOV in root).
+        var systemRoot = Path.GetPathRoot(Environment.SystemDirectory ?? "C:\\") ?? "C:\\";
+        foreach (var d in DriveInfo.GetDrives())
+        {
+            if (!d.IsReady || d.DriveType != DriveType.Fixed)
+                continue;
+            if (string.Equals(d.RootDirectory.FullName, systemRoot, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var root = d.RootDirectory.FullName;
+            if (Directory.Exists(Path.Combine(root, "DCIM")) ||
+                Directory.Exists(Path.Combine(root, "VIDEO")) ||
+                Directory.GetFiles(root, "*.MOV").Length > 0 ||
+                Directory.GetFiles(root, "*.AVI").Length > 0)
+            {
+                removable.Add(root);
+            }
+        }
+        return removable;
     }
 
     [SupportedOSPlatform("windows")]

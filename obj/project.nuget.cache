@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "EcFVuYJo6I8=",
+  "success": true,
+  "projectFilePath": "C:\\dev\\SdCardCopier\\SDCardImporter.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\miles\\.nuget\\packages\\system.codedom\\8.0.0\\system.codedom.8.0.0.nupkg.sha512",
+    "C:\\Users\\miles\\.nuget\\packages\\system.management\\8.0.0\\system.management.8.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}
