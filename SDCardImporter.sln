@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SDCardImporter", "SDCardImporter.csproj", "{0E5476C9-1566-0802-8656-EBBD8B6854DC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{0E5476C9-1566-0802-8656-EBBD8B6854DC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0E5476C9-1566-0802-8656-EBBD8B6854DC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0E5476C9-1566-0802-8656-EBBD8B6854DC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0E5476C9-1566-0802-8656-EBBD8B6854DC}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {FFA811DB-3E9B-4F69-8449-25136BFF2ADC}
+	EndGlobalSection
+EndGlobal
