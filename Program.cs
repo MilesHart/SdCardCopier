@@ -11,6 +11,8 @@ class Program
 
     static async Task<int> Main(string[] args)
     {
+        EnvLoader.Load();
+
         // Handle --check-file before normal parsing (standalone diagnostic)
         for (var i = 0; i < args.Length; i++)
         {
@@ -425,7 +427,10 @@ class Program
     {
         var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")?.Trim();
         if (string.IsNullOrWhiteSpace(token))
-            token = TelegramNotifier.DefaultBotToken;
+        {
+            Console.WriteLine("TELEGRAM_BOT_TOKEN not set. Add it to a .env file or set the environment variable.");
+            return 1;
+        }
 
         Console.WriteLine("Fetching recent messages from your Telegram bot...");
         Console.WriteLine("(If you haven't already: open Telegram, find MiloEventbot, and send any message like /start)");

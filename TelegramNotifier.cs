@@ -1,25 +1,21 @@
 namespace SDCardImporter;
 
 /// <summary>
-/// Sends a short summary to Telegram (MiloEventbot) after each card is processed.
-/// Always sends when TELEGRAM_CHAT_ID is set — including when no files were copied or card was skipped.
+/// Sends a short summary to Telegram after each card is processed.
+/// Credentials are read from environment (set in .env or system). Always sends when TELEGRAM_CHAT_ID is set.
 /// </summary>
 public static class TelegramNotifier
 {
-    internal const string DefaultBotToken = "8230989064:AAFnKzAPsL3Je5kIp2eMMemyrE6NB3GTVlM";
-    internal const string DefaultChatId = "7788144113";
     private static readonly HttpClient HttpClient = new();
 
-    /// <summary>Override from --telegram-chat-id (used when env var is not set, e.g. running from Explorer).</summary>
+    /// <summary>Override from --telegram-chat-id (overrides TELEGRAM_CHAT_ID from .env).</summary>
     public static string? ChatIdOverride { get; set; }
 
-    /// <summary>Current effective chat ID: override, then TELEGRAM_CHAT_ID env, then DefaultChatId.</summary>
+    /// <summary>Current effective chat ID: override, then TELEGRAM_CHAT_ID from env (e.g. .env).</summary>
     public static string? GetEffectiveChatId()
     {
         if (!string.IsNullOrWhiteSpace(ChatIdOverride)) return ChatIdOverride.Trim();
-        var env = Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID")?.Trim();
-        if (!string.IsNullOrWhiteSpace(env)) return env;
-        return DefaultChatId;
+        return Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID")?.Trim();
     }
 
     /// <summary>Sends a copy-result message (always call after processing a card, even if 0 files copied).</summary>
@@ -48,13 +44,16 @@ public static class TelegramNotifier
         var chatId = GetEffectiveChatId();
         if (string.IsNullOrWhiteSpace(chatId))
         {
-            Console.WriteLine("  Telegram: TELEGRAM_CHAT_ID not set — no notification sent. Set the env var or use --telegram-chat-id <id>.");
+            Console.WriteLine("  Telegram: TELEGRAM_CHAT_ID not set — add to .env or use --telegram-chat-id <id>.");
             return;
         }
 
         var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")?.Trim();
         if (string.IsNullOrWhiteSpace(token))
-            token = DefaultBotToken;
+        {
+            Console.WriteLine("  Telegram: TELEGRAM_BOT_TOKEN not set (add to .env) — no notification sent.");
+            return;
+        }
         try
         {
             var url = $"https://api.telegram.org/bot{token}/sendMessage";
