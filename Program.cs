@@ -43,8 +43,7 @@ class Program
 
         if (string.IsNullOrEmpty(_destinationPath))
         {
-            // Default destination path based on OS
-            _destinationPath = GetDefaultDestinationPath();
+            _destinationPath = Environment.GetEnvironmentVariable("DESTINATION_PATH")?.Trim() ?? GetDefaultDestinationPath();
         }
 
         Console.WriteLine($"Destination: {_destinationPath}");
