@@ -8,12 +8,14 @@ public class FileCopier
     private readonly string _destinationRoot;
     private readonly bool _verbose;
     private readonly bool _overwriteAll;
+    private readonly DateTime? _skyZoneLogDate;
 
-    public FileCopier(string destinationRoot, bool verbose = true, bool overwriteAll = false)
+    public FileCopier(string destinationRoot, bool verbose = true, bool overwriteAll = false, DateTime? skyZoneLogDate = null)
     {
         _destinationRoot = destinationRoot;
         _verbose = verbose;
         _overwriteAll = overwriteAll;
+        _skyZoneLogDate = skyZoneLogDate;
     }
 
     /// <summary>
@@ -233,8 +235,10 @@ public class FileCopier
     {
         var fileInfo = new FileInfo(sourceFile);
         
-        // Use file creation time or last write time to determine date
-        var fileDate = GetFileDate(fileInfo);
+        // For SkyZone (GoggleSZ), use the user-provided log date when set; otherwise use file date
+        var fileDate = (deviceType == DeviceType.SkyZoneAnalog && _skyZoneLogDate.HasValue)
+            ? _skyZoneLogDate.Value
+            : GetFileDate(fileInfo);
         
         // Build destination path: /{year}/{month}/{day}/{DeviceFolder}/ (month as Jan, Feb, etc.)
         var destFolder = Path.Combine(

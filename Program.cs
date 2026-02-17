@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SDCardImporter;
 
 class Program
@@ -18,6 +19,11 @@ class Program
                 CheckFileMetadata(args[i + 1]);
                 return 0;
             }
+        }
+        // Handle --telegram-get-chat-id (fetch chat ID from bot updates)
+        if (args.Any(a => a.Equals("--telegram-get-chat-id", StringComparison.OrdinalIgnoreCase)))
+        {
+            return await TelegramGetChatIdAsync();
         }
 
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -40,6 +46,10 @@ class Program
         }
 
         Console.WriteLine($"Destination: {_destinationPath}");
+        var telegramChatId = TelegramNotifier.GetEffectiveChatId();
+        Console.WriteLine(string.IsNullOrEmpty(telegramChatId)
+            ? "Telegram: notifications disabled (TELEGRAM_CHAT_ID not set; use --telegram-chat-id <id> to enable)"
+            : $"Telegram: notifications enabled (chat ID: {telegramChatId})");
         Console.WriteLine($"Supported devices:");
         Console.WriteLine($"  - DJI Goggles 3 -> {DeviceType.DJIGoggles3.GetFolderName()}");
         Console.WriteLine($"  - DJI Flip -> {DeviceType.DJIFlip.GetFolderName()}");
@@ -100,6 +110,18 @@ class Program
                     _autoConfirm = true;
                     break;
 
+                case "--telegram-chat-id":
+                    if (i + 1 < args.Length)
+                    {
+                        TelegramNotifier.ChatIdOverride = args[++i];
+                    }
+                    else
+                    {
+                        Console.WriteLine("Error: --telegram-chat-id requires a value (e.g. 7788144113)");
+                        return false;
+                    }
+                    break;
+
                 case "-o":
                 case "--overwrite":
                     _overwriteAll = true;
@@ -130,6 +152,8 @@ class Program
         Console.WriteLine("  -y, --yes                 Auto-confirm: don't ask before copying");
         Console.WriteLine("  -o, --overwrite            Overwrite existing files (default: skip if same size)");
         Console.WriteLine("  --check-file <path>        Check DJI metadata in a single file (for debugging)");
+        Console.WriteLine("  --telegram-get-chat-id     Get your Telegram chat ID (message the bot first, then run this)");
+        Console.WriteLine("  --telegram-chat-id <id>    Send notifications to this Telegram chat ID (overrides env var)");
         Console.WriteLine("  -h, --help                Show this help message");
         Console.WriteLine();
         Console.WriteLine("Output structure:");
@@ -149,20 +173,7 @@ class Program
 
     static string GetDefaultDestinationPath()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "FPVFootage"
-            );
-        }
-        else
-        {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "FPVFootage"
-            );
-        }
+        return @"\\dazzle\root\FPV";
     }
 
     static async Task<int> RunWatchMode()
@@ -284,6 +295,7 @@ class Program
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine("  Skipping: Could not identify device type.");
             Console.ResetColor();
+            await TelegramNotifier.SendSkippedAsync(detection, "Could not identify device type");
             Console.WriteLine();
             return;
         }
@@ -293,6 +305,7 @@ class Program
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine("  Skipping: No media files found.");
             Console.ResetColor();
+            await TelegramNotifier.SendSkippedAsync(detection, "No media files found");
             Console.WriteLine();
             return;
         }
@@ -307,6 +320,7 @@ class Program
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("  Skipped by user.");
                 Console.ResetColor();
+                await TelegramNotifier.SendSkippedAsync(detection, "Skipped by user");
                 Console.WriteLine();
                 return;
             }
@@ -314,6 +328,13 @@ class Program
             {
                 Console.WriteLine(); // New line after user input
             }
+        }
+
+        // When GoggleSZ (SkyZone) is detected, prompt for date to log files under (default today, 10s timeout)
+        DateTime? skyZoneLogDate = null;
+        if (detection.DeviceType == DeviceType.SkyZoneAnalog)
+        {
+            skyZoneLogDate = await PromptSkyZoneDateAsync();
         }
 
         // Show device type prominently before copy with ASCII art and color
@@ -328,7 +349,7 @@ class Program
         Console.WriteLine("  Copying files...");
         Console.ResetColor();
 
-        var copier = new FileCopier(_destinationPath, _verbose, _overwriteAll);
+        var copier = new FileCopier(_destinationPath, _verbose, _overwriteAll, skyZoneLogDate);
         var result = copier.CopyFiles(detection);
 
         // Report results
@@ -351,6 +372,8 @@ class Program
             Console.ResetColor();
         }
 
+        await TelegramNotifier.SendCopyCompleteAsync(detection, result);
+
         Console.WriteLine();
     }
 
@@ -370,6 +393,87 @@ class Program
             Console.WriteLine($"Video dimensions: {dim.Value.Width} x {dim.Value.Height}");
             if (VideoDimensionReader.Is640x480(filePath))
                 Console.WriteLine("  -> 640x480 (SkyZone DVR)");
+        }
+    }
+
+    /// <summary>
+    /// Prompts for the date to log SkyZone files under. Default is today with 10 second timeout.
+    /// </summary>
+    static async Task<DateTime> PromptSkyZoneDateAsync()
+    {
+        var today = DateTime.Today;
+        Console.Write($"  Date to log SkyZone files under (YYYY-MM-DD) [default: {today:yyyy-MM-dd}, 10s]: ");
+        var line = await ReadLineWithTimeoutAsync(TimeSpan.FromSeconds(10));
+        if (string.IsNullOrEmpty(line))
+        {
+            Console.WriteLine($"  Using {today:yyyy-MM-dd} (today).");
+            return today;
+        }
+        if (DateTime.TryParse(line, out var parsed))
+        {
+            return parsed.Date;
+        }
+        Console.WriteLine($"  Invalid date, using {today:yyyy-MM-dd} (today).");
+        return today;
+    }
+
+    /// <summary>
+    /// Fetches Telegram getUpdates and prints chat IDs so the user can set TELEGRAM_CHAT_ID.
+    /// User must message the bot first, then run this.
+    /// </summary>
+    static async Task<int> TelegramGetChatIdAsync()
+    {
+        var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")?.Trim();
+        if (string.IsNullOrWhiteSpace(token))
+            token = TelegramNotifier.DefaultBotToken;
+
+        Console.WriteLine("Fetching recent messages from your Telegram bot...");
+        Console.WriteLine("(If you haven't already: open Telegram, find MiloEventbot, and send any message like /start)");
+        Console.WriteLine();
+
+        try
+        {
+            using var http = new HttpClient();
+            var url = $"https://api.telegram.org/bot{token}/getUpdates";
+            var json = await http.GetStringAsync(url);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+            {
+                Console.WriteLine("Bot API returned ok: false. Check your bot token.");
+                if (root.TryGetProperty("description", out var desc))
+                    Console.WriteLine(desc.GetString());
+                return 1;
+            }
+            if (!root.TryGetProperty("result", out var result) || result.GetArrayLength() == 0)
+            {
+                Console.WriteLine("No updates found (result is empty).");
+                Console.WriteLine();
+                Console.WriteLine("Do this:");
+                Console.WriteLine("  1. Open Telegram and search for your bot (e.g. MiloEventbot).");
+                Console.WriteLine("  2. Send a message to the bot (e.g. /start or 'hi').");
+                Console.WriteLine("  3. Run this command again: SDCardImporter --telegram-get-chat-id");
+                return 1;
+            }
+            var chatIds = new HashSet<long>();
+            foreach (var update in result.EnumerateArray())
+            {
+                if (update.TryGetProperty("message", out var msg) && msg.TryGetProperty("chat", out var chat) && chat.TryGetProperty("id", out var idEl))
+                {
+                    chatIds.Add(idEl.GetInt64());
+                }
+            }
+            Console.WriteLine("Set TELEGRAM_CHAT_ID to one of these (then run the importer):");
+            foreach (var id in chatIds)
+                Console.WriteLine($"  {id}");
+            Console.WriteLine();
+            Console.WriteLine("Example: set TELEGRAM_CHAT_ID=" + chatIds.First());
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error: " + ex.Message);
+            return 1;
         }
     }
 

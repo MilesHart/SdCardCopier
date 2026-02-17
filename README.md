@@ -87,6 +87,10 @@ SDCardImporter -d C:\Footage -w -y
 | `-y, --yes` | Auto-confirm: don't ask before copying |
 | `-h, --help` | Show help message |
 
+### Telegram notifications
+
+After each card copy completes, a short summary can be sent to Telegram (MiloEventbot). Set the environment variable **`TELEGRAM_CHAT_ID`** to the chat ID where you want messages (e.g. your user or a group). To get your chat ID: message the bot, then open `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` and read `result.message.chat.id`. Optionally set **`TELEGRAM_BOT_TOKEN`** to use a different bot.
+
 ## Platform-Specific Notes
 
 ### Windows
