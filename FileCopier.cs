@@ -63,6 +63,7 @@ public class FileCopier
                 if (copied)
                 {
                     result.FilesCopied++;
+                    result.SuccessfullyCopiedSourcePaths.Add(sourceFile);
                 }
             }
             catch (Exception ex)
@@ -416,6 +417,8 @@ public class CopyResult
     public int FilesSkipped { get; set; }
     public long BytesCopied { get; set; }
     public List<string> Errors { get; set; } = new();
+    /// <summary>Source file paths that were successfully copied (for optional delete-after-copy).</summary>
+    public List<string> SuccessfullyCopiedSourcePaths { get; set; } = new();
 
     public bool Success => Errors.Count == 0 && FilesCopied > 0;
     

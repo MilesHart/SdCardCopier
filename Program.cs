@@ -375,6 +375,40 @@ class Program
 
         await TelegramNotifier.SendCopyCompleteAsync(detection, result);
 
+        // Prompt to delete successfully copied files from source (files only, 10s timeout)
+        if (result.SuccessfullyCopiedSourcePaths.Count > 0)
+        {
+            Console.Write($"  Delete {result.SuccessfullyCopiedSourcePaths.Count} successfully copied files from source? [Y/n] (10s timeout, default Y): ");
+            var deleteAnswer = await ReadLineWithTimeoutAsync(TimeSpan.FromSeconds(10), "timeout, deleting source files");
+            if (deleteAnswer != null && string.Equals(deleteAnswer, "n", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("  Skipped deleting source files.");
+            }
+            else
+            {
+                var deleted = 0;
+                var deleteErrors = 0;
+                foreach (var path in result.SuccessfullyCopiedSourcePaths)
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                        {
+                            File.Delete(path);
+                            deleted++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        deleteErrors++;
+                        if (deleteErrors <= 3)
+                            Console.WriteLine($"  Failed to delete {path}: {ex.Message}");
+                    }
+                }
+                Console.WriteLine($"  Deleted {deleted} files from source." + (deleteErrors > 0 ? $" ({deleteErrors} errors)" : ""));
+            }
+        }
+
         Console.WriteLine();
     }
 
@@ -484,13 +518,13 @@ class Program
     /// <summary>
     /// Reads a line from console with timeout. Returns null on timeout (treated as default/yes).
     /// </summary>
-    static async Task<string?> ReadLineWithTimeoutAsync(TimeSpan timeout)
+    static async Task<string?> ReadLineWithTimeoutAsync(TimeSpan timeout, string? timeoutMessage = null)
     {
         var readTask = Task.Run(() => Console.ReadLine());
         var completed = await Task.WhenAny(readTask, Task.Delay(timeout));
         if (completed != readTask)
         {
-            Console.WriteLine(" (timeout, proceeding with copy)");
+            Console.WriteLine(timeoutMessage != null ? $" ({timeoutMessage})" : " (timeout, proceeding with copy)");
             return null;
         }
         return (await readTask)?.Trim();
