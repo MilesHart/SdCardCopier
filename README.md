@@ -109,6 +109,27 @@ After each card copy completes, a short summary can be sent to Telegram (MiloEve
 - **Watch mode** waits for USB drives to become ready before processing (USB devices can take a moment after connection)
 - Compatible with any USB SD card reader/adapter
 
+### Deploy to Raspberry Pi
+
+Deploy to a Pi at `192.168.1.251` (or set `PI_HOST`, `PI_USER`, `PI_PATH`):
+
+**From Windows (PowerShell):**
+```powershell
+cd SdCardCopier
+.\deploy\deploy-to-pi.ps1
+```
+
+**Options:** `-PiHost 192.168.1.251` `-User pi` `-RemotePath /home/pi/SdCardCopier` `-Runtime linux-arm64` (or `linux-arm` for 32-bit Pi OS).
+
+**Requirements:** OpenSSH (e.g. `ssh pi@192.168.1.251` works) and the Pi has `mkdir`/`scp` target path writable.
+
+**On the Pi after deploy:** ensure the binary is executable and set destination (e.g. network share or local path):
+```bash
+chmod +x /home/pi/SdCardCopier/SDCardImporter
+# Example: watch mode, auto-confirm, destination /mnt/footage
+/home/pi/SdCardCopier/SDCardImporter -w -y -d /mnt/footage
+```
+
 ### Running as a Service (Linux)
 
 Create `/etc/systemd/system/sdcard-importer.service`:
@@ -119,7 +140,7 @@ Description=SD Card Importer Service
 After=network.target
 
 [Service]
-ExecStart=/path/to/SDCardImporter -w -y -d /home/pi/FPVFootage
+ExecStart=/home/pi/SdCardCopier/SDCardImporter -w -y -d /mnt/footage
 User=pi
 Restart=always
 RestartSec=10

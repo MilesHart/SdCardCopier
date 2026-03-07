@@ -40,13 +40,9 @@ public static class TelegramNotifier
 
     private static async Task SendAsync(string text)
     {
-        Console.WriteLine("  Sending message to Telegram...");
         var chatId = GetEffectiveChatId();
         if (string.IsNullOrWhiteSpace(chatId))
-        {
-            Console.WriteLine("  Telegram: TELEGRAM_CHAT_ID not set — add to .env or use --telegram-chat-id <id>.");
             return;
-        }
 
         var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")?.Trim();
         if (string.IsNullOrWhiteSpace(token))
@@ -54,6 +50,8 @@ public static class TelegramNotifier
             Console.WriteLine("  Telegram: TELEGRAM_BOT_TOKEN not set (add to .env) — no notification sent.");
             return;
         }
+
+        Console.WriteLine("  Sending message to Telegram...");
         try
         {
             var url = $"https://api.telegram.org/bot{token}/sendMessage";

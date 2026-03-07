@@ -46,6 +46,23 @@ class Program
             _destinationPath = Environment.GetEnvironmentVariable("DESTINATION_PATH")?.Trim() ?? GetDefaultDestinationPath();
         }
 
+        var destError = ValidateDestinationPath(_destinationPath);
+        if (destError != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Destination path error: {destError}");
+            if (OperatingSystem.IsLinux())
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("  Tip: Create the directory and give your user access, e.g.:");
+                Console.WriteLine("       sudo mkdir -p /mnt/footage && sudo chown $USER:$USER /mnt/footage");
+                Console.WriteLine("  Or use a path you can write to (e.g. /home/pi/footage).");
+                Console.ResetColor();
+            }
+            Console.ResetColor();
+            return 1;
+        }
+
         Console.WriteLine($"Destination: {_destinationPath}");
         var telegramChatId = TelegramNotifier.GetEffectiveChatId();
         Console.WriteLine(string.IsNullOrEmpty(telegramChatId)
@@ -172,6 +189,55 @@ class Program
         Console.WriteLine("  SDCardImporter -d /mnt/footage -w -y    # Watch mode with custom destination, auto-copy");
     }
 
+    /// <summary>Returns null if the path is available and writable; otherwise an error message.</summary>
+    static string? ValidateDestinationPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return "Destination path is empty.";
+        path = path.Trim();
+        try
+        {
+            if (!Directory.Exists(path))
+            {
+                Directory.CreateDirectory(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            return $"Destination path is not available or could not be created: {ex.Message}";
+        }
+        string testFile = Path.Combine(path, ".sd-importer-write-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            File.WriteAllBytes(testFile, Array.Empty<byte>());
+            File.Delete(testFile);
+        }
+        catch (Exception ex)
+        {
+            return $"Destination path is not writeable: {ex.Message}";
+        }
+        return null;
+    }
+
+    /// <summary>Returns true if the path exists and we can create/delete a file there (e.g. for delete-after-copy).</summary>
+    static bool IsPathWritable(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return false;
+        path = path.Trim();
+        string testFile = Path.Combine(path, ".sd-importer-write-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            File.WriteAllBytes(testFile, Array.Empty<byte>());
+            File.Delete(testFile);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     static string GetDefaultDestinationPath()
     {
         return @"\\dazzle\root\FPV";
@@ -268,6 +334,13 @@ class Program
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine($"Analyzing: {drivePath}");
         Console.ResetColor();
+
+        if (!IsPathWritable(drivePath))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  Warning: SD card is read-only. You will not be able to delete files from the card after copying.");
+            Console.ResetColor();
+        }
 
         var detector = new DeviceDetector(drivePath);
         var detection = detector.Detect();

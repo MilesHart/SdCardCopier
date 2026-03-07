@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace SDCardImporter;
 
 /// <summary>
@@ -5,6 +7,41 @@ namespace SDCardImporter;
 /// </summary>
 public class FileCopier
 {
+    private const uint PROGRESS_CONTINUE = 0;
+    private const double ProgressUpdateIntervalSeconds = 5.0;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CopyFileEx(
+        string lpExistingFileName,
+        string lpNewFileName,
+        CopyProgressRoutine? pProgressRoutine,
+        IntPtr lpData,
+        IntPtr pbCancel,
+        uint dwCopyFlags);
+
+    private delegate uint CopyProgressRoutine(
+        long TotalFileSize,
+        long TotalBytesTransferred,
+        long StreamSize,
+        long StreamBytesTransferred,
+        uint dwStreamNumber,
+        uint dwCallbackReason,
+        IntPtr hSourceFile,
+        IntPtr hDestinationFile,
+        IntPtr lpData);
+
+    private sealed class CopyProgressContext
+    {
+        public long BytesBeforeThisFile;
+        public int FileIndex;
+        public int TotalFiles;
+        public long TotalBytes;
+        public string FileName = "";
+        public long CopyStartTick;
+        public long LastDisplayBytes;
+        public long LastDisplayTick;
+        public long LastProgressUpdateTick;
+    }
     private readonly string _destinationRoot;
     private readonly bool _verbose;
     private readonly bool _overwriteAll;
@@ -49,9 +86,9 @@ public class FileCopier
         var totalBytes = filesToCopy.Sum(f => new FileInfo(f).Length);
         long bytesCopiedSoFar = 0;
         var fileIndex = 0;
-        var copyStartTime = DateTime.UtcNow;
+        var copyStartTick = WindowsPerformanceTimer.GetTimestamp();
         long lastBytesForCurrentRate = 0;
-        var lastRateUpdateTime = copyStartTime;
+        long lastRateTick = copyStartTick;
 
         foreach (var sourceFile in filesToCopy)
         {
@@ -59,7 +96,7 @@ public class FileCopier
             {
                 // For DJI cards, check each file's metadata to route Flip vs O4 Pro correctly
                 var deviceTypeForFile = GetDeviceTypeForFile(sourceFile, detection.DeviceType);
-                var copied = CopyFile(sourceFile, deviceTypeForFile, result, totalBytes, ref bytesCopiedSoFar, ++fileIndex, filesToCopy.Count, copyStartTime, ref lastBytesForCurrentRate, ref lastRateUpdateTime);
+                var copied = CopyFile(sourceFile, deviceTypeForFile, result, totalBytes, ref bytesCopiedSoFar, ++fileIndex, filesToCopy.Count, copyStartTick, ref lastBytesForCurrentRate, ref lastRateTick);
                 if (copied)
                 {
                     result.FilesCopied++;
@@ -232,7 +269,7 @@ public class FileCopier
         return cardLevelDevice;
     }
 
-    private bool CopyFile(string sourceFile, DeviceType deviceType, CopyResult result, long totalBytes, ref long bytesCopiedSoFar, int fileIndex, int totalFiles, DateTime copyStartTime, ref long lastBytesForCurrentRate, ref DateTime lastRateUpdateTime)
+    private bool CopyFile(string sourceFile, DeviceType deviceType, CopyResult result, long totalBytes, ref long bytesCopiedSoFar, int fileIndex, int totalFiles, long copyStartTick, ref long lastBytesForCurrentRate, ref long lastRateTick)
     {
         var fileInfo = new FileInfo(sourceFile);
         
@@ -264,7 +301,7 @@ public class FileCopier
                 bytesCopiedSoFar += fileInfo.Length;
                 if (_verbose)
                 {
-                    UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: true, copyStartTime);
+                    UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: true, copyStartTick);
                 }
                 result.FilesSkipped++;
                 return false;
@@ -278,20 +315,32 @@ public class FileCopier
         // Copy the file
         if (_verbose)
         {
-            UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTime, lastBytesForCurrentRate, lastRateUpdateTime);
+            UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTick, lastBytesForCurrentRate, lastRateTick);
         }
 
         var prevBytes = lastBytesForCurrentRate;
-        var prevTime = lastRateUpdateTime;
-        File.Copy(sourceFile, destFile, overwrite: _overwriteAll);
-        result.BytesCopied += fileInfo.Length;
-        bytesCopiedSoFar += fileInfo.Length;
-        lastBytesForCurrentRate = bytesCopiedSoFar;
-        lastRateUpdateTime = DateTime.UtcNow;
+        var prevTick = lastRateTick;
+        bool copySucceeded;
+        if (OperatingSystem.IsWindows() && _verbose)
+        {
+            copySucceeded = CopyFileWithProgressEx(sourceFile, destFile, bytesCopiedSoFar, fileIndex, totalFiles, totalBytes, fileInfo.Name, copyStartTick);
+        }
+        else
+        {
+            File.Copy(sourceFile, destFile, overwrite: _overwriteAll);
+            copySucceeded = true;
+        }
+        if (copySucceeded)
+        {
+            result.BytesCopied += fileInfo.Length;
+            bytesCopiedSoFar += fileInfo.Length;
+            lastBytesForCurrentRate = bytesCopiedSoFar;
+            lastRateTick = WindowsPerformanceTimer.GetTimestamp();
+        }
 
         if (_verbose)
         {
-            UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTime, prevBytes, prevTime);
+            UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTick, prevBytes, prevTick);
         }
         
         // Preserve file timestamps
@@ -318,7 +367,7 @@ public class FileCopier
             .FirstOrDefault(DateTime.Now);
     }
 
-    private static void UpdateProgressBar(int fileIndex, int totalFiles, long bytesCopied, long totalBytes, string fileName, bool skipped, DateTime copyStartTime, long lastBytesForCurrentRate = 0, DateTime lastRateUpdateTime = default)
+    private static void UpdateProgressBar(int fileIndex, int totalFiles, long bytesCopied, long totalBytes, string fileName, bool skipped, long copyStartTick, long lastBytesForCurrentRate = 0, long lastRateTick = 0)
     {
         var pct = totalBytes > 0 ? (int)(bytesCopied * 100 / totalBytes) : 0;
         var barWidth = 25;
@@ -327,31 +376,34 @@ public class FileCopier
         var status = skipped ? " (skip)" : "";
         var displayName = fileName.Length > 40 ? fileName[..37] + "..." : fileName;
 
-        var etaStr = "";
-        if (!skipped && totalBytes > 0 && bytesCopied < totalBytes)
+        var nowTick = WindowsPerformanceTimer.GetTimestamp();
+        var elapsedTotal = WindowsPerformanceTimer.ElapsedSeconds(copyStartTick, nowTick);
+        var meanRate = elapsedTotal > 0.1 ? bytesCopied / elapsedTotal : 0;
+        double currentRate = 0;
+        var elapsedSinceLast = 0.0;
+        if (lastRateTick != 0)
         {
-            var elapsedTotal = (DateTime.UtcNow - copyStartTime).TotalSeconds;
-            var meanRate = elapsedTotal > 0.1 ? bytesCopied / elapsedTotal : 0;
-            double currentRate = 0;
-            if (lastRateUpdateTime != default)
-            {
-                var elapsedSinceLast = (DateTime.UtcNow - lastRateUpdateTime).TotalSeconds;
-                var bytesSinceLast = bytesCopied - lastBytesForCurrentRate;
-                if (elapsedSinceLast > 0.01 && bytesSinceLast >= 0)
-                    currentRate = bytesSinceLast / elapsedSinceLast;
-            }
-            var effectiveRate = currentRate > 0 ? (meanRate + currentRate) / 2 : meanRate;
-            if (effectiveRate > 1024)
-            {
-                var remainingBytes = totalBytes - bytesCopied;
-                var etaSeconds = (int)(remainingBytes / effectiveRate);
-                var timeSpanRemaining = TimeSpan.FromSeconds(etaSeconds);
-                var completionTime = DateTime.Now + timeSpanRemaining;
-                etaStr = $" ETA {FormatTime(etaSeconds)} ({completionTime:h:mm}{completionTime.ToString("tt").ToLowerInvariant()})";
-            }
+            elapsedSinceLast = WindowsPerformanceTimer.ElapsedSeconds(lastRateTick, nowTick);
+            var bytesSinceLast = bytesCopied - lastBytesForCurrentRate;
+            if (elapsedSinceLast > 0.01 && bytesSinceLast >= 0)
+                currentRate = bytesSinceLast / elapsedSinceLast;
+        }
+        // Prefer current rate when we have a recent sample (>= 0.5s) so the display
+        // reflects actual transfer speed and isn't dragged down by the long-term average.
+        var effectiveRate = (currentRate > 0 && elapsedSinceLast >= 0.5) ? currentRate : meanRate;
+        var speedStr = effectiveRate > 0 ? $" {FormatSpeed(effectiveRate)}" : "";
+
+        var etaStr = "";
+        if (!skipped && totalBytes > 0 && bytesCopied < totalBytes && effectiveRate > 1024)
+        {
+            var remainingBytes = totalBytes - bytesCopied;
+            var etaSeconds = (int)(remainingBytes / effectiveRate);
+            var timeSpanRemaining = TimeSpan.FromSeconds(etaSeconds);
+            var completionTime = DateTime.Now + timeSpanRemaining;
+            etaStr = $" ETA {FormatTime(etaSeconds)} ({completionTime:h:mm}{completionTime.ToString("tt").ToLowerInvariant()})";
         }
 
-        var output = $"  [{bar}] {pct,3}% ({fileIndex}/{totalFiles}) {displayName}{status}{etaStr}";
+        var output = $"  [{bar}] {pct,3}% ({fileIndex}/{totalFiles}) {displayName}{status}{speedStr}{etaStr}";
         var clearWidth = Math.Max(120, GetConsoleWidth());
 
         Console.Write("\r");
@@ -370,6 +422,14 @@ public class FileCopier
         return $"{mins}:{secs:D2}";
     }
 
+    private static string FormatSpeed(double bytesPerSecond)
+    {
+        if (bytesPerSecond <= 0) return "0 B/s";
+        if (bytesPerSecond < 1024) return $"{bytesPerSecond:F0} B/s";
+        if (bytesPerSecond < 1024 * 1024) return $"{bytesPerSecond / 1024:F1} KB/s";
+        return $"{bytesPerSecond / (1024 * 1024):F1} MB/s";
+    }
+
     private static int GetConsoleWidth()
     {
         try
@@ -380,6 +440,52 @@ public class FileCopier
         {
             return 80;
         }
+    }
+
+    private static bool CopyFileWithProgressEx(string sourceFile, string destFile, long bytesBeforeThisFile, int fileIndex, int totalFiles, long totalBytes, string fileName, long copyStartTick)
+    {
+        var ctx = new CopyProgressContext
+        {
+            BytesBeforeThisFile = bytesBeforeThisFile,
+            FileIndex = fileIndex,
+            TotalFiles = totalFiles,
+            TotalBytes = totalBytes,
+            FileName = fileName,
+            CopyStartTick = copyStartTick,
+            LastDisplayBytes = bytesBeforeThisFile,
+            LastDisplayTick = copyStartTick,
+            LastProgressUpdateTick = copyStartTick
+        };
+        var handle = GCHandle.Alloc(ctx);
+        try
+        {
+            var callback = new CopyProgressRoutine(CopyProgressCallback);
+            if (!CopyFileEx(sourceFile, destFile, callback, GCHandle.ToIntPtr(handle), IntPtr.Zero, 0))
+            {
+                var err = Marshal.GetLastWin32Error();
+                throw new InvalidOperationException($"CopyFileEx failed: {err}");
+            }
+            return true;
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    private static uint CopyProgressCallback(long totalFileSize, long totalBytesTransferred, long streamSize, long streamBytesTransferred, uint dwStreamNumber, uint dwCallbackReason, IntPtr hSourceFile, IntPtr hDestinationFile, IntPtr lpData)
+    {
+        var ctx = (CopyProgressContext)GCHandle.FromIntPtr(lpData).Target!;
+        long bytesCopiedSoFar = ctx.BytesBeforeThisFile + totalBytesTransferred;
+        long nowTick = WindowsPerformanceTimer.GetTimestamp();
+        if (WindowsPerformanceTimer.ElapsedSeconds(ctx.LastProgressUpdateTick, nowTick) >= ProgressUpdateIntervalSeconds)
+        {
+            UpdateProgressBar(ctx.FileIndex, ctx.TotalFiles, bytesCopiedSoFar, ctx.TotalBytes, ctx.FileName, skipped: false, ctx.CopyStartTick, ctx.LastDisplayBytes, ctx.LastDisplayTick);
+            ctx.LastDisplayBytes = bytesCopiedSoFar;
+            ctx.LastDisplayTick = nowTick;
+            ctx.LastProgressUpdateTick = nowTick;
+        }
+        return PROGRESS_CONTINUE;
     }
 
     private string GetUniqueFilePath(string filePath)
