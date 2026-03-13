@@ -11,6 +11,19 @@ class Program
 
     static async Task<int> Main(string[] args)
     {
+        try
+        {
+            return await MainCore(args);
+        }
+        catch (Exception ex)
+        {
+            ReportCrash(ex);
+            return 1;
+        }
+    }
+
+    static async Task<int> MainCore(string[] args)
+    {
         EnvLoader.Load();
 
         // Handle --check-file before normal parsing (standalone diagnostic)
@@ -164,7 +177,7 @@ class Program
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  -d, --destination <path>  Set the destination root folder for copied files");
-        Console.WriteLine("                            Default: ~/FPVFootage (Linux/Mac) or Documents\\FPVFootage (Windows)");
+        Console.WriteLine("                            Default: DESTINATION_PATH in .env, or ~/FPVFootage (Linux) / Documents\\FPVFootage (Windows)");
         Console.WriteLine("  -w, --watch               Watch mode: continuously monitor for SD card insertions");
         Console.WriteLine("  -q, --quiet               Quiet mode: minimal output");
         Console.WriteLine("  -y, --yes                 Auto-confirm: don't ask before copying");
@@ -187,6 +200,37 @@ class Program
         Console.WriteLine("  SDCardImporter                          # Scan current removable drives");
         Console.WriteLine("  SDCardImporter -w                       # Watch for SD card insertions");
         Console.WriteLine("  SDCardImporter -d /mnt/footage -w -y    # Watch mode with custom destination, auto-copy");
+    }
+
+    /// <summary>Report an unhandled exception without calling ToString() (which can throw and cause 'Cannot print exception string' on some runtimes).</summary>
+    static void ReportCrash(Exception ex)
+    {
+        var logPath = Path.Combine(AppContext.BaseDirectory, "sdcard-importer-crash.txt");
+        try
+        {
+            using var w = new StreamWriter(logPath, append: false);
+            w.WriteLine(DateTime.UtcNow.ToString("o"));
+            w.WriteLine("Type: " + ex.GetType().FullName);
+            try { w.WriteLine("Message: " + ex.Message); } catch { w.WriteLine("Message: [could not get]"); }
+            try { w.WriteLine("StackTrace:\n" + ex.StackTrace); } catch { }
+            if (ex.InnerException != null)
+            {
+                w.WriteLine("Inner: " + ex.InnerException.GetType().FullName + " - " + ex.InnerException.Message);
+            }
+        }
+        catch { /* ignore */ }
+
+        try
+        {
+            Console.Error.WriteLine("SD Card Importer crashed.");
+            Console.Error.WriteLine("Exception: " + ex.GetType().Name);
+            try { Console.Error.WriteLine("Message: " + ex.Message); } catch { }
+            Console.Error.WriteLine("Details written to: " + logPath);
+        }
+        catch
+        {
+            // Last resort: nothing we can do
+        }
     }
 
     /// <summary>Returns null if the path is available and writable; otherwise an error message.</summary>
@@ -240,7 +284,9 @@ class Program
 
     static string GetDefaultDestinationPath()
     {
-        return @"\\dazzle\root\FPV";
+        if (OperatingSystem.IsWindows())
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "FPVFootage");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "FPVFootage");
     }
 
     static async Task<int> RunWatchMode()
@@ -439,9 +485,9 @@ class Program
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"    Errors: {result.Errors.Count}");
-            foreach (var error in result.Errors.Take(5))
+            foreach (var (message, count) in result.GetGroupedErrors())
             {
-                Console.WriteLine($"      - {error}");
+                Console.WriteLine(count > 1 ? $"      - {message} ({count})" : $"      - {message}");
             }
             Console.ResetColor();
         }

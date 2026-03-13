@@ -143,12 +143,14 @@ public static class UsbDriveDetector
             }
 
             // Also check standard mount locations for any mounted USB storage
+            var runMediaUser = "";
+            try { runMediaUser = $"/run/media/{Environment.UserName}"; } catch { /* UserName can throw in some environments */ }
             var searchPaths = new[]
             {
                 "/media",
                 "/mnt",
-                $"/run/media/{Environment.UserName}"
-            };
+                runMediaUser
+            }.Where(p => !string.IsNullOrEmpty(p)).ToArray();
 
             foreach (var basePath in searchPaths)
             {

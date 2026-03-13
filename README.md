@@ -119,9 +119,31 @@ cd SdCardCopier
 .\deploy\deploy-to-pi.ps1
 ```
 
-**Options:** `-PiHost 192.168.1.251` `-User pi` `-RemotePath /home/pi/SdCardCopier` `-Runtime linux-arm64` (or `linux-arm` for 32-bit Pi OS).
+**Options:** `-PiHost 192.168.1.251` `-User pi` `-RemotePath /home/pi/SdCardCopier` `-Runtime linux-arm64` (or `linux-arm` for 32-bit Pi OS). Add **`-FrameworkDependent`** to publish without the .NET runtime (smaller; requires .NET 8 on the Pi).
 
 **Requirements:** OpenSSH (e.g. `ssh pi@192.168.1.251` works) and the Pi has `mkdir`/`scp` target path writable.
+
+**If you see "Signature specified is zero-sized" on the Pi:** the deployed files may be corrupted or the self-contained layout can trigger this. Redeploy using **framework-dependent** so the Pi uses its own .NET runtime:
+```powershell
+.\deploy\deploy-to-pi.ps1 -FrameworkDependent
+```
+Then on the Pi install the .NET 8 runtime once. **You must add Microsoft’s package repo first** (Raspberry Pi OS doesn’t include it):
+
+```bash
+# 1) See your Debian version (e.g. 12 = Bookworm, 11 = Bullseye)
+cat /etc/os-release | grep VERSION_ID
+
+# 2) Add Microsoft repo — use 12 for Bookworm, 11 for Bullseye
+DEB_VER=12
+wget https://packages.microsoft.com/config/debian/${DEB_VER}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+
+# 3) Install .NET 8 runtime
+sudo apt-get update && sudo apt-get install -y dotnet-runtime-8.0
+```
+
+If `dotnet-runtime-8.0` is still not found (e.g. on some ARM setups), install via the official script: [Scripted install - Linux](https://learn.microsoft.com/dotnet/core/install/linux-scripted-manual#scripted-install) (download `install-dotnet.sh`, then run e.g. `./install-dotnet.sh --channel 8.0 --runtime dotnet --install-dir ~/.dotnet` and add `~/.dotnet` to PATH).
 
 **On the Pi after deploy:** ensure the binary is executable and set destination (e.g. network share or local path):
 ```bash

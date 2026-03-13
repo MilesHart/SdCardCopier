@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace SDCardImporter;
@@ -84,6 +85,14 @@ public class FileCopier
         }
 
         var totalBytes = filesToCopy.Sum(f => new FileInfo(f).Length);
+        const long marginBytes = 100L * 1024 * 1024; // 100 MB margin
+        var freeSpace = GetAvailableFreeSpaceForPath(_destinationRoot);
+        if (freeSpace.HasValue && freeSpace.Value < totalBytes + marginBytes)
+        {
+            result.Errors.Add($"Not enough space on destination. Need {FormatBytes(totalBytes + marginBytes)}, available {FormatBytes(freeSpace.Value)}. Free some space and try again.");
+            return result;
+        }
+
         long bytesCopiedSoFar = 0;
         var fileIndex = 0;
         var copyStartTick = WindowsPerformanceTimer.GetTimestamp();
@@ -106,6 +115,10 @@ public class FileCopier
             catch (Exception ex)
             {
                 result.Errors.Add($"Error copying {sourceFile}: {ex.Message}");
+                if (IsOutOfSpaceError(ex))
+                {
+                    result.Errors.Add("Destination ran out of space. Free some space and try again.");
+                }
             }
         }
 
@@ -442,6 +455,69 @@ public class FileCopier
         }
     }
 
+    /// <summary>Returns available free space in bytes for the path's volume, or null if unknown.</summary>
+    private static long? GetAvailableFreeSpaceForPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        path = Path.GetFullPath(path.Trim());
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var root = Path.GetPathRoot(path);
+                if (string.IsNullOrEmpty(root)) return null;
+                var drive = new DriveInfo(root);
+                if (!drive.IsReady) return null;
+                return drive.AvailableFreeSpace;
+            }
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                // df -k reports in 1K blocks; parse "Available" (4th column)
+                using var proc = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "df",
+                        ArgumentList = { "-k", path },
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                proc.Start();
+                var output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit(2000);
+                if (proc.ExitCode != 0) return null;
+                var lines = output.Split('\n');
+                if (lines.Length < 2) return null;
+                var cols = lines[1].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                // Header: Filesystem 1K-blocks Used Available Use% Mounted
+                if (cols.Length < 4) return null;
+                if (long.TryParse(cols[3], out var availK))
+                    return availK * 1024;
+                return null;
+            }
+        }
+        catch { /* ignore */ }
+        return null;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+
+    private static bool IsOutOfSpaceError(Exception ex)
+    {
+        var msg = ex.Message;
+        return msg.Contains("No space left on device", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("ENOSPC", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("not enough space", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool CopyFileWithProgressEx(string sourceFile, string destFile, long bytesBeforeThisFile, int fileIndex, int totalFiles, long totalBytes, string fileName, long copyStartTick)
     {
         var ctx = new CopyProgressContext
@@ -527,7 +603,19 @@ public class CopyResult
     public List<string> SuccessfullyCopiedSourcePaths { get; set; } = new();
 
     public bool Success => Errors.Count == 0 && FilesCopied > 0;
-    
+
+    /// <summary>Groups errors by type (message after last ": " or full message) and returns (message, count) for display.</summary>
+    public IEnumerable<(string Message, int Count)> GetGroupedErrors()
+    {
+        return Errors
+            .GroupBy(e =>
+            {
+                var idx = e.LastIndexOf(": ", StringComparison.Ordinal);
+                return idx >= 0 ? e[(idx + 2)..].Trim() : e;
+            })
+            .Select(g => (g.Key, g.Count()));
+    }
+
     public string GetFormattedSize()
     {
         if (BytesCopied < 1024)

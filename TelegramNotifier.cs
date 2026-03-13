@@ -27,6 +27,12 @@ public static class TelegramNotifier
             ? $"{result.FilesCopied} copied, {result.FilesSkipped} skipped, {result.GetFormattedSize()} — {result.Errors.Count} error(s)"
             : $"{result.FilesCopied} copied, {result.FilesSkipped} skipped, {result.GetFormattedSize()}";
         var text = $"SD Card copy complete\nDevice: {deviceName}\nStatus: {status}\n{summary}";
+        var grouped = result.GetGroupedErrors().ToList();
+        if (grouped.Count > 0)
+        {
+            var errorLines = grouped.Select(g => g.Count > 1 ? $"{g.Message} ({g.Count})" : g.Message);
+            text += "\nErrors: " + string.Join("; ", errorLines);
+        }
         await SendAsync(text).ConfigureAwait(false);
     }
 

@@ -7,7 +7,8 @@ param(
     [string]$User = "pi",
     [string]$RemotePath = "/home/pi/SdCardCopier",
     [ValidateSet("linux-arm64", "linux-arm")]
-    [string]$Runtime = "linux-arm64"
+    [string]$Runtime = "linux-arm64",
+    [switch]$FrameworkDependent
 )
 
 # Override from environment if set (works in PowerShell 5.1 and 7)
@@ -17,12 +18,14 @@ if ($env:PI_PATH) { $RemotePath = $env:PI_PATH }
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$PublishDir = Join-Path (Join-Path $ProjectRoot "publish") $Runtime
+$PublishSuffix = if ($FrameworkDependent) { "fd" } else { "sc" }
+$PublishDir = Join-Path (Join-Path $ProjectRoot "publish") "$Runtime-$PublishSuffix"
 
-Write-Host "Publishing for $Runtime..." -ForegroundColor Cyan
+Write-Host "Publishing for $Runtime ($(if ($FrameworkDependent) { 'framework-dependent' } else { 'self-contained' }))..." -ForegroundColor Cyan
 Push-Location $ProjectRoot
 try {
-    dotnet publish -c Release -r $Runtime --self-contained -o $PublishDir
+    $selfContained = if ($FrameworkDependent) { "false" } else { "true" }
+    dotnet publish -c Release -r $Runtime --self-contained $selfContained -o $PublishDir
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
@@ -50,5 +53,20 @@ if (Test-Path $EnvExample) {
     & scp $EnvExample "${Dest}/.env.example"
 }
 
+# Copy run-importer.sh to Pi Desktop
+$RunScript = Join-Path $PSScriptRoot "run-importer.sh"
+$DesktopPath = "/home/pi/Desktop"
+if (Test-Path $RunScript) {
+    Write-Host "Copying run-importer.sh to Desktop ..." -ForegroundColor Cyan
+    & ssh "${User}@${PiHost}" "mkdir -p $DesktopPath"
+    & scp $RunScript "${User}@${PiHost}:${DesktopPath}/run-importer.sh"
+    if ($LASTEXITCODE -eq 0) {
+        & ssh "${User}@${PiHost}" "chmod +x ${DesktopPath}/run-importer.sh"
+    }
+}
+
 Write-Host "Deploy complete. Binary: $RemotePath/SDCardImporter" -ForegroundColor Green
-Write-Host "On the Pi, run: $RemotePath/SDCardImporter -w -y -d /mnt/footage  (or your destination)" -ForegroundColor Gray
+if ($FrameworkDependent) {
+    Write-Host "On the Pi, install .NET 8 runtime (add Microsoft repo first — see README 'Deploy to Raspberry Pi'): sudo apt install dotnet-runtime-8.0" -ForegroundColor Yellow
+}
+Write-Host "On the Pi, run: $RemotePath/SDCardImporter -w -y -d /home/pi/footage  (or your destination)" -ForegroundColor Gray
