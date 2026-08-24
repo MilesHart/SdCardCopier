@@ -1,0 +1,73 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="720" d:DesignHeight="640"
+        x:Class="SDCardImporter.Desktop.MainWindow"
+        Title="SD Card Importer"
+        Width="720" Height="640" MinWidth="560" MinHeight="480">
+  <DockPanel Margin="16">
+    <TextBlock DockPanel.Dock="Top" Text="SD Card Importer"
+               FontSize="22" FontWeight="SemiBold" Margin="0,0,0,4" />
+    <TextBlock DockPanel.Dock="Top" Text="Watch for SD/USB cards and copy into organized folders. No browser required."
+               Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+               TextWrapping="Wrap" Margin="0,0,0,12" />
+
+    <ScrollViewer>
+      <StackPanel Spacing="12">
+        <Border Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+                BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="12">
+          <StackPanel Spacing="10">
+            <TextBlock Text="Destination folder" FontWeight="SemiBold" />
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto">
+              <TextBox x:Name="DestBox" Grid.Column="0" Watermark="Path to FPVFootage root"
+ MinHeight="36" AcceptsReturn="False" />
+              <Button x:Name="BrowseBtn" Grid.Column="1" Content="Browse…" Margin="8,0,0,0"
+                      MinWidth="100" VerticalAlignment="Stretch" Click="BrowseClick" />
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button x:Name="StartBtn" Content="Start watching" MinWidth="140" MinHeight="36"
+                      Click="StartClick" />
+              <Button x:Name="StopBtn" Content="Stop" MinWidth="100" MinHeight="36"
+                      IsEnabled="False" Click="StopClick" />
+ <TextBlock x:Name="HostBadge" VerticalAlignment="Center" Margin="8,0,0,0"
+                         Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+            </StackPanel>
+            <TextBlock x:Name="DestError" Foreground="#c42b1c" TextWrapping="Wrap" IsVisible="False" />
+          </StackPanel>
+        </Border>
+
+        <Border Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+                BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="12">
+          <StackPanel Spacing="8">
+            <TextBlock Text="Live status" FontWeight="SemiBold" />
+            <TextBlock x:Name="StatusTitle" Text="Idle" FontSize="18" FontWeight="SemiBold" />
+            <TextBlock x:Name="StatusDetail" Text="Not running." TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+            <ProgressBar x:Name="ProgressBar" Height="10" Minimum="0" Maximum="100" Value="0"
+                         IsVisible="False" />
+            <TextBlock x:Name="ProgressSub" FontSize="12"
+                       Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+                       TextWrapping="Wrap" />
+            <TextBlock x:Name="PulseText" FontSize="12"
+                       Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+            <TextBox x:Name="ActivityLog" IsReadOnly="True" AcceptsReturn="True"
+ MinHeight="100" MaxHeight="160" FontFamily="Consolas,monospace" FontSize="11"
+                     TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+
+        <Expander Header="Supported devices &amp; output layout" IsExpanded="False">
+          <StackPanel Margin="0,8,0,0" Spacing="8">
+            <TextBlock TextWrapping="Wrap" FontSize="12"
+                       Text="Output: {destination}/{year}/{month}/{day}/{DeviceFolder}/ — e.g. GoggleDJI, DJIFlip, GoggleSZ, DJI04, GP13, Other." />
+            <TextBlock TextWrapping="Wrap" FontSize="12"
+                       Text="Telegram: set TELEGRAM_CHAT_ID in .env next to the app. CLI options remain available via SDCardImporter.exe." />
+          </StackPanel>
+        </Expander>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

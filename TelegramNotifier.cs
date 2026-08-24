@@ -18,11 +18,11 @@ public static class TelegramNotifier
         return Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID")?.Trim();
     }
 
-    /// <summary>Sends a copy-result message (always call after processing a card, even if 0 files copied).</summary>
-    public static async Task SendCopyCompleteAsync(DeviceDetectionResult detection, CopyResult result)
+    /// <summary>Sends a copy-result message (always call after processing a card, even if 0 files copied). Pass monitorUrl to include web UI link.</summary>
+    public static async Task SendCopyCompleteAsync(DeviceDetectionResult detection, CopyResult result, string? monitorUrl = null)
     {
         var status = result.Errors.Count > 0 ? "❌ Failed" : (result.FilesCopied > 0 ? "✅ Success" : "✅ Skipped (nothing new to copy)");
-        var deviceName = detection.DeviceType.GetDisplayName();
+        var deviceName = detection.GetDeviceDisplayName();
         var summary = result.Errors.Count > 0
             ? $"{result.FilesCopied} copied, {result.FilesSkipped} skipped, {result.GetFormattedSize()} — {result.Errors.Count} error(s)"
             : $"{result.FilesCopied} copied, {result.FilesSkipped} skipped, {result.GetFormattedSize()}";
@@ -33,13 +33,30 @@ public static class TelegramNotifier
             var errorLines = grouped.Select(g => g.Count > 1 ? $"{g.Message} ({g.Count})" : g.Message);
             text += "\nErrors: " + string.Join("; ", errorLines);
         }
+        var url = monitorUrl ?? Environment.GetEnvironmentVariable("WEB_URL")?.Trim();
+        if (!string.IsNullOrWhiteSpace(url))
+            text += $"\n\nMonitor: {url.TrimEnd('/')}/";
         await SendAsync(text).ConfigureAwait(false);
     }
 
-    /// <summary>Sends a skipped-card message (e.g. unknown device, no files, user said no).</summary>
+    /// <summary>Sends a card-detected message when an SD card is inserted (e.g. in watch mode). Include monitorUrl for web UI link.</summary>
+    public static async Task SendCardDetectedAsync(string drivePath, string? monitorUrl = null)
+    {
+        var url = monitorUrl ?? Environment.GetEnvironmentVariable("WEB_URL")?.Trim();
+        var text = $"💾 SD card detected\nDrive: {drivePath}\nMonitor: {url ?? "(set WEB_URL in .env)"}";
+        await SendAsync(text).ConfigureAwait(false);
+    }
+
+    /// <summary>Sends a test message to verify Telegram configuration (--telegram-test).</summary>
+    public static async Task SendTestAsync()
+    {
+        await SendAsync("✅ SD Card Importer: Telegram test — if you see this, notifications are working.").ConfigureAwait(false);
+    }
+
+    /// <summary>Sends a skipped-card message.</summary>
     public static async Task SendSkippedAsync(DeviceDetectionResult detection, string reason)
     {
-        var deviceName = detection.DeviceType.GetDisplayName();
+        var deviceName = detection.GetDeviceDisplayName();
         var text = $"SD Card skipped\nDevice: {deviceName}\nReason: {reason}";
         await SendAsync(text).ConfigureAwait(false);
     }
@@ -48,7 +65,11 @@ public static class TelegramNotifier
     {
         var chatId = GetEffectiveChatId();
         if (string.IsNullOrWhiteSpace(chatId))
+        {
+            Console.WriteLine("  Telegram: TELEGRAM_CHAT_ID not set — notification skipped.");
+            Console.WriteLine("  Ensure .env is in the same folder as the executable, with TELEGRAM_CHAT_ID and TELEGRAM_BOT_TOKEN.");
             return;
+        }
 
         var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")?.Trim();
         if (string.IsNullOrWhiteSpace(token))

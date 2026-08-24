@@ -10,7 +10,7 @@ public enum DeviceType
     DJIFlip,          // DJIFlip - DJI Flip camera
     SkyZoneAnalog,    // GoggleSZ
     BetaPavo20Pro,    // DJI04
-    GoPro13,          // GP13
+    GoPro13,          // GP13 (legacy folder code for GoPro family)
     Generic           // Other - unrecognized card with media files
 }
 
@@ -39,22 +39,8 @@ public static class DeviceTypeExtensions
         DeviceType.DJIFlip => "DJI Flip",
         DeviceType.SkyZoneAnalog => "SkyZone Analog FPV Goggles",
         DeviceType.BetaPavo20Pro => "BetaPavo20 Pro (DJI O4 Pro)",
-        DeviceType.GoPro13 => "GoPro Hero 13",
+        DeviceType.GoPro13 => "GoPro (Hero family, incl. Session 5)",
         DeviceType.Generic => "Generic / Other (unrecognized)",
         _ => "Unknown Device"
-    };
-
-    /// <summary>
-    /// Gets 3-line cute ASCII art for the device type
-    /// </summary>
-    public static string GetAsciiArt(this DeviceType deviceType) => deviceType switch
-    {
-        DeviceType.DJIGoggles3 => "  __o__  __o__\n /     \\/     \\\n|   DJI G3    |",
-        DeviceType.DJIFlip => "  .----.\n  |Flip|\n  '----'",
-        DeviceType.SkyZoneAnalog => "  .---.  .---.\n | SZ  | | SZ  |\n  '---'  '---'",
-        DeviceType.BetaPavo20Pro => "    /\\\n   /O4\\\n   \\__/",
-        DeviceType.GoPro13 => "  +------+\n | GP13  |\n  +------+",
-        DeviceType.Generic => "  .-----.\n |Other |\n  '-----'",
-        _ => "   ?  ?  ?\n  (  ?  )\n   -----"
     };
 }

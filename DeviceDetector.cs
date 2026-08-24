@@ -1,12 +1,13 @@
-using System.Text.RegularExpressions;
-
 namespace SDCardImporter;
 
 /// <summary>
-/// Detects the type of device that created content on an SD card
+/// Identifies the device that created content on an SD card via <c>autoUpdater.txt</c> on the card root.
 /// </summary>
 public class DeviceDetector
 {
+    /// <summary>Name of the identification file expected at the root of every card.</summary>
+    public const string AutoUpdaterFileName = "autoUpdater.txt";
+
     private readonly string _rootPath;
 
     public DeviceDetector(string rootPath)
@@ -15,7 +16,9 @@ public class DeviceDetector
     }
 
     /// <summary>
-    /// Analyzes the SD card and determines the device type
+    /// Reads <c>autoUpdater.txt</c> from the card root to identify the device. If the file is
+    /// missing or empty, <see cref="DeviceDetectionResult.NeedsIdentification"/> is set so the
+    /// caller can prompt the user and persist the answer via <see cref="WriteAutoUpdaterFile"/>.
     /// </summary>
     public DeviceDetectionResult Detect()
     {
@@ -25,38 +28,41 @@ public class DeviceDetector
             VolumeLabel = GetVolumeLabel()
         };
 
-        // Check for DCIM folder (standard camera folder)
-        var dcimPath = Path.Combine(_rootPath, "DCIM");
-        
-        if (Directory.Exists(dcimPath))
+        var firstLine = ReadAutoUpdaterFirstLine(_rootPath);
+        if (!string.IsNullOrEmpty(firstLine) && !firstLine.Equals("Other", StringComparison.OrdinalIgnoreCase))
         {
-            result.HasDcimFolder = true;
-            result.DeviceType = AnalyzeDcimFolder(dcimPath, result);
-            // SkyZone cards can have DCIM too (e.g. DCIM\100\*.MOV at 640x480) – confirm before treating as Generic
-            if (result.DeviceType == DeviceType.Unknown || result.DeviceType == DeviceType.Generic)
-                TryConfirmSkyZone(result);
+            result.IdentLabel = firstLine;
+            result.DeviceType = DeviceDetectionResult.MapAutoUpdaterLineToDeviceType(firstLine);
         }
         else
         {
-            // No DCIM: check for SkyZone DVR (root or VIDEO folder)
-            result.DeviceType = CheckForSkyZoneDvr(result);
+            result.NeedsIdentification = true;
         }
 
-        // If still unknown but has DJI files, check for goggles vs drone
-        if (result.DeviceType == DeviceType.Unknown)
-        {
-            result.DeviceType = CheckForMiscPatterns(result);
-        }
-
-        // Final fallback: scan for any media in DCIM or root, treat as Generic
-        if (result.DeviceType == DeviceType.Unknown)
-        {
-            result.DeviceType = GatherGenericMediaAndDetect(result);
-            if (result.DeviceType == DeviceType.Generic)
-                TryConfirmSkyZone(result);
-        }
-
+        CollectStandardMediaFiles(result);
         return result;
+    }
+
+    /// <summary>Reads the first non-empty line of <c>autoUpdater.txt</c> at <paramref name="rootPath"/>, or null if absent/empty.</summary>
+    public static string? ReadAutoUpdaterFirstLine(string rootPath)
+    {
+        var path = Path.Combine(rootPath, AutoUpdaterFileName);
+        if (!File.Exists(path))
+            return null;
+        try
+        {
+            return File.ReadLines(path).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Writes <paramref name="deviceName"/> as the first line of <c>autoUpdater.txt</c> on the card root.</summary>
+    public static void WriteAutoUpdaterFile(string rootPath, string deviceName)
+    {
+        File.WriteAllText(Path.Combine(rootPath, AutoUpdaterFileName), deviceName.Trim() + Environment.NewLine);
     }
 
     private string GetVolumeLabel()
@@ -70,7 +76,6 @@ public class DeviceDetector
             }
             else
             {
-                // On Linux, try to get label from /dev/disk/by-label or mount info
                 return GetLinuxVolumeLabel();
             }
         }
@@ -84,10 +89,9 @@ public class DeviceDetector
     {
         try
         {
-            // Try to find label from mount point
             var mountOutput = File.ReadAllText("/proc/mounts");
             var lines = mountOutput.Split('\n');
-            
+
             foreach (var line in lines)
             {
                 if (line.Contains(_rootPath))
@@ -96,7 +100,6 @@ public class DeviceDetector
                     if (parts.Length > 0)
                     {
                         var device = parts[0];
-                        // Try to get label from blkid or by-label symlinks
                         var byLabelPath = "/dev/disk/by-label";
                         if (Directory.Exists(byLabelPath))
                         {
@@ -120,457 +123,34 @@ public class DeviceDetector
         return "";
     }
 
-    private DeviceType AnalyzeDcimFolder(string dcimPath, DeviceDetectionResult result)
-    {
-        var subdirs = Directory.GetDirectories(dcimPath);
-        var mediaExtensions = new[] { ".mp4", ".mov", ".avi", ".jpg", ".jpeg", ".dng", ".png", ".m4v", ".mkv" };
-
-        foreach (var subdir in subdirs)
-        {
-            var dirName = Path.GetFileName(subdir);
-            
-            // GoPro pattern: 100GOPRO, 101GOPRO, etc.
-            if (Regex.IsMatch(dirName, @"^\d{3}GOPRO$", RegexOptions.IgnoreCase))
-            {
-                result.FoundPatterns.Add($"GoPro folder: {dirName}");
-                if (VerifyGoProFiles(subdir, result))
-                {
-                    return DeviceType.GoPro13;
-                }
-            }
-            
-            // DJI pattern: 100MEDIA, 101MEDIA, etc.
-            if (Regex.IsMatch(dirName, @"^\d{3}MEDIA$", RegexOptions.IgnoreCase))
-            {
-                result.FoundPatterns.Add($"DJI Media folder: {dirName}");
-                return AnalyzeDjiMediaFolder(subdir, result);
-            }
-
-            // DJI Flip pattern: DJI_001, DJI_002, etc.
-            if (Regex.IsMatch(dirName, @"^DJI_\d{3}$", RegexOptions.IgnoreCase))
-            {
-                result.FoundPatterns.Add($"DJI Flip folder: {dirName}");
-                return AnalyzeDjiFlipFolder(dcimPath, result);
-            }
-
-            // Generic camera patterns: 100___01, 101___01, 100CANON, 100_PANA, 100OLYMP, 100EK_001, etc.
-            if (Regex.IsMatch(dirName, @"^\d{3}[A-Z_]{2,8}\d*$", RegexOptions.IgnoreCase) ||
-                Regex.IsMatch(dirName, @"^\d{3}_\d+$", RegexOptions.IgnoreCase))
-            {
-                result.FoundPatterns.Add($"Camera folder: {dirName}");
-                if (CollectMediaFromFolder(subdir, result, mediaExtensions))
-                {
-                    return DeviceType.Generic;
-                }
-            }
-
-            // Any folder with digits: 100, 101, 100_0001, etc.
-            if (Regex.IsMatch(dirName, @"^\d{3}"))
-            {
-                result.FoundPatterns.Add($"Media folder: {dirName}");
-                if (CollectMediaFromFolder(subdir, result, mediaExtensions))
-                {
-                    return DeviceType.Generic;
-                }
-            }
-        }
-
-        return DeviceType.Unknown;
-    }
-
-    private static readonly string[] DjiFlipExtraFolders = ["HYPERLAPSE", "PANORAMA"];
-
-    private DeviceType AnalyzeDjiFlipFolder(string dcimPath, DeviceDetectionResult result)
-    {
-        try
-        {
-            var mediaExtensions = new[] { ".mp4", ".mov", ".avi", ".jpg", ".jpeg", ".dng", ".png", ".m4v", ".mkv" };
-            var found = false;
-
-            // Scan DJI_001, DJI_002, etc. in DCIM
-            foreach (var subdir in Directory.GetDirectories(dcimPath))
-            {
-                var dirName = Path.GetFileName(subdir);
-                if (Regex.IsMatch(dirName, @"^DJI_\d{3}$", RegexOptions.IgnoreCase))
-                {
-                    found |= CollectMediaFromPath(subdir, result, mediaExtensions, "DJI Flip");
-                }
-            }
-
-            // Scan HYPERLAPSE and PANORAMA (at root or in DCIM)
-            foreach (var folderName in DjiFlipExtraFolders)
-            {
-                var rootFolder = Path.Combine(_rootPath, folderName);
-                if (Directory.Exists(rootFolder))
-                {
-                    result.FoundPatterns.Add($"DJI Flip folder: {folderName}");
-                    found |= CollectMediaFromPath(rootFolder, result, mediaExtensions, "DJI Flip");
-                }
-                var dcimFolder = Path.Combine(dcimPath, folderName);
-                if (Directory.Exists(dcimFolder))
-                {
-                    result.FoundPatterns.Add($"DJI Flip folder: DCIM/{folderName}");
-                    found |= CollectMediaFromPath(dcimFolder, result, mediaExtensions, "DJI Flip");
-                }
-            }
-
-            if (!found) return DeviceType.Unknown;
-
-            // Use metadata (pb_file tags) to distinguish Flip from O4 Pro
-            var metadataType = DjiMetadataReader.DetectFromFiles(result.MediaFiles);
-            if (metadataType == DeviceType.BetaPavo20Pro)
-            {
-                result.FoundPatterns.Add("Metadata: pb_file:dvtm_O4P.proto (O4 Pro)");
-                return DeviceType.BetaPavo20Pro;
-            }
-            if (metadataType == DeviceType.DJIFlip)
-            {
-                result.FoundPatterns.Add("Metadata: pb_file:dvtm_flip.proto (DJI Flip)");
-            }
-
-            return DeviceType.DJIFlip;
-        }
-        catch
-        {
-            return DeviceType.Unknown;
-        }
-    }
-
-    private bool CollectMediaFromPath(string folderPath, DeviceDetectionResult result, string[] extensions, string label)
-    {
-        var found = false;
-        foreach (var file in Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories))
-        {
-            var ext = Path.GetExtension(file).ToLowerInvariant();
-            if (extensions.Contains(ext))
-            {
-                result.MediaFiles.Add(file);
-                result.FoundPatterns.Add($"{label} file: {Path.GetFileName(file)}");
-                found = true;
-            }
-        }
-        return found;
-    }
-
-    private bool CollectMediaFromFolder(string folderPath, DeviceDetectionResult result, string[] extensions)
-    {
-        try
-        {
-            var found = false;
-            foreach (var file in Directory.GetFiles(folderPath))
-            {
-                var ext = Path.GetExtension(file).ToLowerInvariant();
-                if (extensions.Contains(ext))
-                {
-                    result.MediaFiles.Add(file);
-                    found = true;
-                }
-            }
-            return found;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private bool VerifyGoProFiles(string folderPath, DeviceDetectionResult result)
-    {
-        try
-        {
-            var files = Directory.GetFiles(folderPath);
-            foreach (var file in files)
-            {
-                var fileName = Path.GetFileName(file);
-                
-                // GoPro file patterns: GOPRXXXX.MP4, GXNNNNNN.MP4, GLXXXXXX.LRV
-                if (Regex.IsMatch(fileName, @"^(GOPR|GX|GL|GH)\d+\.(MP4|LRV|THM|JPG)$", RegexOptions.IgnoreCase))
-                {
-                    result.FoundPatterns.Add($"GoPro file: {fileName}");
-                    result.MediaFiles.Add(file);
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore access errors
-        }
-        return false;
-    }
-
-    private DeviceType AnalyzeDjiMediaFolder(string folderPath, DeviceDetectionResult result)
-    {
-        try
-        {
-            var files = Directory.GetFiles(folderPath);
-            bool hasDjiFiles = false;
-            bool hasO4ProMarkers = false;
-
-            foreach (var file in files)
-            {
-                var fileName = Path.GetFileName(file);
-                
-                // DJI file pattern: DJI_XXXX.MP4, DJI_XXXX_D.MP4, etc.
-                if (Regex.IsMatch(fileName, @"^DJI_\d+.*\.(MP4|MOV|JPG)$", RegexOptions.IgnoreCase))
-                {
-                    hasDjiFiles = true;
-                    result.FoundPatterns.Add($"DJI file: {fileName}");
-                    result.MediaFiles.Add(file);
-                }
-            }
-
-            if (!hasDjiFiles) return DeviceType.Unknown;
-
-            // Use metadata (pb_file tags) to distinguish Flip from O4 Pro - most reliable
-            var metadataType = DjiMetadataReader.DetectFromFiles(result.MediaFiles);
-            if (metadataType == DeviceType.DJIFlip)
-            {
-                result.FoundPatterns.Add("Metadata: pb_file:dvtm_flip.proto (DJI Flip)");
-                return DeviceType.DJIFlip;
-            }
-            if (metadataType == DeviceType.BetaPavo20Pro)
-            {
-                result.FoundPatterns.Add("Metadata: pb_file:dvtm_O4P.proto (O4 Pro)");
-                return DeviceType.BetaPavo20Pro;
-            }
-
-            // Fallback: Check for O4 Pro specific markers (SRT, large files)
-            hasO4ProMarkers = CheckForO4ProMarkers(folderPath, result);
-
-            // Check parent folders for additional clues
-            var miscPath = Path.Combine(Path.GetDirectoryName(folderPath)!, "..", "MISC");
-            if (Directory.Exists(miscPath))
-            {
-                result.FoundPatterns.Add("MISC folder present (common in DJI devices)");
-            }
-
-            // Priority: O4 Pro > Goggles (if we can distinguish)
-            if (hasO4ProMarkers)
-            {
-                return DeviceType.BetaPavo20Pro;
-            }
-            
-            // Default DJI media to Goggles 3 (most common use case for this tool)
-            return DeviceType.DJIGoggles3;
-        }
-        catch
-        {
-            return DeviceType.Unknown;
-        }
-    }
-
-    private bool CheckForO4ProMarkers(string folderPath, DeviceDetectionResult result)
-    {
-        try
-        {
-            // O4 Pro files are typically 4K60 and larger file sizes
-            // Also check for LRF (Low Resolution File) companions
-            var files = Directory.GetFiles(folderPath);
-            foreach (var file in files)
-            {
-                var fileInfo = new FileInfo(file);
-                var fileName = Path.GetFileName(file);
-                
-                // O4 Pro often has accompanying .SRT subtitle files with GPS data
-                if (fileName.EndsWith(".SRT", StringComparison.OrdinalIgnoreCase))
-                {
-                    result.FoundPatterns.Add("SRT subtitle file found (O4 Pro marker)");
-                    return true;
-                }
-                
-                // Check for very large files (4K60 is typically >500MB per minute)
-                if (fileInfo.Extension.Equals(".MP4", StringComparison.OrdinalIgnoreCase) &&
-                    fileInfo.Length > 500_000_000) // >500MB suggests 4K
-                {
-                    result.FoundPatterns.Add("Large video file detected (possible 4K from O4 Pro)");
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
-        return false;
-    }
-
-    private bool CheckForGogglesMarkers(string folderPath, DeviceDetectionResult result)
-    {
-        try
-        {
-            // Goggles recordings are typically lower resolution feed recordings
-            var files = Directory.GetFiles(folderPath, "*.MP4");
-            foreach (var file in files)
-            {
-                var fileInfo = new FileInfo(file);
-                
-                // Goggles DVR files are typically smaller (720p or 1080p feed)
-                // Usually <100MB per minute at lower bitrate
-                if (fileInfo.Length < 200_000_000) // <200MB
-                {
-                    result.FoundPatterns.Add("Smaller video file (typical of Goggles DVR)");
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
-        return false;
-    }
-
-    private DeviceType CheckForSkyZoneDvr(DeviceDetectionResult result)
-    {
-        try
-        {
-            // SkyZone goggles save MOV files with H264 encoding at 640x480
-            // They typically save directly to root or a simple VIDEO folder
-            var movFiles = Directory.GetFiles(_rootPath, "*.MOV", SearchOption.TopDirectoryOnly);
-            
-            if (movFiles.Length > 0)
-            {
-                foreach (var file in movFiles)
-                {
-                    var fileName = Path.GetFileName(file);
-                    result.FoundPatterns.Add($"MOV file in root: {fileName}");
-                    result.MediaFiles.Add(file);
-                }
-                if (Has640x480Video(result.MediaFiles))
-                    result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
-                if (movFiles.Any(f => Regex.IsMatch(Path.GetFileName(f), @"^\d{8}_\d{6}\.MOV$", RegexOptions.IgnoreCase) ||
-                                      Regex.IsMatch(Path.GetFileName(f), @"^VID_\d+\.MOV$", RegexOptions.IgnoreCase) ||
-                                      Regex.IsMatch(Path.GetFileName(f), @"^\d+\.MOV$", RegexOptions.IgnoreCase)))
-                    result.FoundPatterns.Add("SkyZone-style filename pattern detected");
-                return DeviceType.SkyZoneAnalog;
-            }
-
-            // Also check for AVI files (older SkyZone models)
-            var aviFiles = Directory.GetFiles(_rootPath, "*.AVI", SearchOption.TopDirectoryOnly);
-            if (aviFiles.Length > 0)
-            {
-                foreach (var file in aviFiles)
-                {
-                    result.FoundPatterns.Add($"AVI file in root: {Path.GetFileName(file)}");
-                    result.MediaFiles.Add(file);
-                }
-                if (Has640x480Video(result.MediaFiles))
-                    result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
-                return DeviceType.SkyZoneAnalog;
-            }
-
-            // Check VIDEO folder (SkyZone directory structure)
-            var videoPath = Path.Combine(_rootPath, "VIDEO");
-            if (Directory.Exists(videoPath))
-            {
-                var videoFiles = Directory.GetFiles(videoPath, "*.*")
-                    .Where(f => f.EndsWith(".MOV", StringComparison.OrdinalIgnoreCase) ||
-                               f.EndsWith(".AVI", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                
-                if (videoFiles.Any())
-                {
-                    result.FoundPatterns.Add("VIDEO folder with recordings found");
-                    result.MediaFiles.AddRange(videoFiles);
-                    if (Has640x480Video(result.MediaFiles))
-                        result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
-                    return DeviceType.SkyZoneAnalog;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
-        
-        return DeviceType.Unknown;
-    }
-
-    /// <summary>True if any MOV/MP4/AVI in the list is 640x480 (SkyZone goggle DVR resolution).</summary>
-    private static bool Has640x480Video(List<string> mediaFiles)
-    {
-        foreach (var path in mediaFiles)
-        {
-            var ext = Path.GetExtension(path).ToLowerInvariant();
-            if (ext is not ".mov" and not ".mp4" and not ".m4v" and not ".avi") continue;
-            if (VideoDimensionReader.Is640x480(path))
-                return true;
-        }
-        return false;
-    }
-
-    private DeviceType CheckForMiscPatterns(DeviceDetectionResult result)
-    {
-        // Additional fallback checks
-        try
-        {
-            // Check volume label for clues
-            var label = result.VolumeLabel?.ToUpperInvariant() ?? "";
-            
-            if (label.Contains("GOPRO"))
-            {
-                result.FoundPatterns.Add($"Volume label contains 'GOPRO': {result.VolumeLabel}");
-                return DeviceType.GoPro13;
-            }
-            
-            if (label.Contains("DJI"))
-            {
-                result.FoundPatterns.Add($"Volume label contains 'DJI': {result.VolumeLabel}");
-                return DeviceType.DJIGoggles3;
-            }
-            
-            if (label.Contains("SKYZONE") || label.Contains("SKY"))
-            {
-                result.FoundPatterns.Add($"Volume label contains 'SKY': {result.VolumeLabel}");
-                return DeviceType.SkyZoneAnalog;
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
-        
-        return DeviceType.Unknown;
-    }
-
-    /// <summary>
-    /// Final fallback: recursively scan for any media files and treat as Generic
-    /// </summary>
-    private DeviceType GatherGenericMediaAndDetect(DeviceDetectionResult result)
+    /// <summary>DCIM, root, PRIVATE, VIDEO — same extensions as the copy pipeline. Populates <see cref="DeviceDetectionResult.MediaFiles"/>.</summary>
+    private void CollectStandardMediaFiles(DeviceDetectionResult result)
     {
         var extensions = new[] { ".mp4", ".mov", ".avi", ".jpg", ".jpeg", ".dng", ".png", ".m4v", ".mkv", ".lrv", ".thm", ".srt" };
         var mediaFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
-            // Scan DCIM recursively
             var dcimPath = Path.Combine(_rootPath, "DCIM");
+            result.HasDcimFolder = Directory.Exists(dcimPath);
+
             if (Directory.Exists(dcimPath))
             {
                 foreach (var file in Directory.GetFiles(dcimPath, "*.*", SearchOption.AllDirectories))
                 {
                     var ext = Path.GetExtension(file).ToLowerInvariant();
                     if (extensions.Contains(ext))
-                    {
                         mediaFiles.Add(file);
-                        result.FoundPatterns.Add($"Generic media: {Path.GetFileName(file)}");
-                    }
                 }
             }
 
-            // Scan root for media
             foreach (var file in Directory.GetFiles(_rootPath, "*.*", SearchOption.TopDirectoryOnly))
             {
                 var ext = Path.GetExtension(file).ToLowerInvariant();
                 if (extensions.Contains(ext))
-                {
                     mediaFiles.Add(file);
-                    result.FoundPatterns.Add($"Root media: {Path.GetFileName(file)}");
-                }
             }
 
-            // Scan PRIVATE (common on some cameras)
             var privatePath = Path.Combine(_rootPath, "PRIVATE");
             if (Directory.Exists(privatePath))
             {
@@ -578,13 +158,10 @@ public class DeviceDetector
                 {
                     var ext = Path.GetExtension(file).ToLowerInvariant();
                     if (extensions.Contains(ext))
-                    {
                         mediaFiles.Add(file);
-                    }
                 }
             }
 
-            // Scan VIDEO folder
             var videoPath = Path.Combine(_rootPath, "VIDEO");
             if (Directory.Exists(videoPath))
             {
@@ -592,64 +169,21 @@ public class DeviceDetector
                 {
                     var ext = Path.GetExtension(file).ToLowerInvariant();
                     if (extensions.Contains(ext))
-                    {
                         mediaFiles.Add(file);
-                    }
                 }
             }
 
-            if (mediaFiles.Count > 0)
-            {
-                result.MediaFiles.AddRange(mediaFiles);
-                // SkyZone: directory structure (VIDEO or MOV/AVI in root) + 640x480 => GoggleSZ
-                if (HasSkyZoneLikeStructure() && Has640x480Video(result.MediaFiles))
-                {
-                    result.FoundPatterns.Add("VIDEO/root MOV structure + 640x480 (SkyZone DVR)");
-                    return DeviceType.SkyZoneAnalog;
-                }
-                result.FoundPatterns.Add($"Generic detection: {mediaFiles.Count} media files found");
-                return DeviceType.Generic;
-            }
+            result.MediaFiles.AddRange(mediaFiles);
         }
         catch
         {
             // Ignore access errors
         }
-
-        return DeviceType.Unknown;
-    }
-
-    /// <summary>SkyZone layout: VIDEO folder, or MOV/AVI in root, or MOV/AVI under DCIM.</summary>
-    private bool HasSkyZoneLikeStructure()
-    {
-        if (Directory.Exists(Path.Combine(_rootPath, "VIDEO"))) return true;
-        if (Directory.GetFiles(_rootPath, "*.MOV", SearchOption.TopDirectoryOnly).Length > 0) return true;
-        if (Directory.GetFiles(_rootPath, "*.AVI", SearchOption.TopDirectoryOnly).Length > 0) return true;
-        var dcimPath = Path.Combine(_rootPath, "DCIM");
-        if (Directory.Exists(dcimPath))
-        {
-            foreach (var f in Directory.GetFiles(dcimPath, "*.*", SearchOption.AllDirectories))
-            {
-                var ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext == ".mov" || ext == ".avi") return true;
-            }
-        }
-        return false;
-    }
-
-    /// <summary>When we have Generic/Unknown but structure + 640x480 match SkyZone, set GoggleSZ.</summary>
-    private void TryConfirmSkyZone(DeviceDetectionResult result)
-    {
-        if (result.MediaFiles.Count == 0) return;
-        if (!HasSkyZoneLikeStructure()) return;
-        if (!Has640x480Video(result.MediaFiles)) return;
-        result.DeviceType = DeviceType.SkyZoneAnalog;
-        result.FoundPatterns.Add("Video dimensions 640x480 (SkyZone DVR)");
     }
 }
 
 /// <summary>
-/// Result of device detection analysis
+/// Result of device identification for a card.
 /// </summary>
 public class DeviceDetectionResult
 {
@@ -657,6 +191,69 @@ public class DeviceDetectionResult
     public string VolumeLabel { get; set; } = "";
     public DeviceType DeviceType { get; set; } = DeviceType.Unknown;
     public bool HasDcimFolder { get; set; }
-    public List<string> FoundPatterns { get; set; } = new();
     public List<string> MediaFiles { get; set; } = new();
+
+    /// <summary>True when no (or an empty) <c>autoUpdater.txt</c> was found — caller must prompt and persist a name.</summary>
+    public bool NeedsIdentification { get; set; }
+
+    /// <summary>First line of root <c>autoUpdater.txt</c> once identified; used for display and routing.</summary>
+    public string? IdentLabel { get; set; }
+
+    /// <summary>User-facing device name: <see cref="IdentLabel"/> when set, otherwise enum display name.</summary>
+    public string GetDeviceDisplayName() =>
+        !string.IsNullOrWhiteSpace(IdentLabel) ? IdentLabel.Trim() : DeviceType.GetDisplayName();
+
+    /// <summary>
+    /// Destination subfolder name for this card. For a recognized device this is the fixed folder
+    /// code (e.g. <c>GP13</c>). For an unrecognized card, uses the raw <see cref="IdentLabel"/> text
+    /// from <c>autoUpdater.txt</c> as the folder name (sanitized) instead of dumping it in <c>Other</c>,
+    /// so differently-labeled unknown cards don't get merged into one bucket.
+    /// </summary>
+    public string GetFolderName()
+    {
+        if (DeviceType != DeviceType.Generic)
+            return DeviceType.GetFolderName();
+
+        var label = IdentLabel?.Trim();
+        if (string.IsNullOrEmpty(label) || label.Equals("Other", StringComparison.OrdinalIgnoreCase))
+            return DeviceType.Generic.GetFolderName();
+
+        return SanitizeFolderName(label);
+    }
+
+    private static string SanitizeFolderName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = name.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
+        var sanitized = new string(chars).Trim().Trim('.');
+        return sanitized.Length == 0 ? DeviceType.Generic.GetFolderName() : sanitized;
+    }
+
+    /// <summary>
+    /// Maps the first line of <c>autoUpdater.txt</c> to a <see cref="DeviceType"/> for destination folders.
+    /// Unrecognized text maps to <see cref="DeviceType.Generic"/> (folder <c>Other</c>).
+    /// </summary>
+    public static DeviceType MapAutoUpdaterLineToDeviceType(string line)
+    {
+        var s = line.Trim();
+        if (s.Length == 0)
+            return DeviceType.Generic;
+
+        foreach (var (code, dt) in AutoUpdaterFolderCodes)
+        {
+            if (s.Equals(code, StringComparison.OrdinalIgnoreCase))
+                return dt;
+        }
+
+        return DeviceType.Generic;
+    }
+
+    private static readonly (string Code, DeviceType Type)[] AutoUpdaterFolderCodes =
+    [
+        ("GoggleDJI", DeviceType.DJIGoggles3),
+        ("DJIFlip", DeviceType.DJIFlip),
+        ("GoggleSZ", DeviceType.SkyZoneAnalog),
+        ("DJI04", DeviceType.BetaPavo20Pro),
+        ("GP13", DeviceType.GoPro13),
+    ];
 }

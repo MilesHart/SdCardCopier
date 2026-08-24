@@ -4,12 +4,17 @@ A cross-platform .NET 8 application that automatically detects and copies media 
 
 ## Supported Devices
 
-| Device | Folder Name | Detection Method |
-|--------|-------------|------------------|
-| DJI Goggles 3 | `GoggleDJI` | DCIM/100MEDIA folders with DJI_* files |
-| SkyZone Analog FPV Goggles | `GoggleSZ` | MOV/AVI files in root or VIDEO folder |
-| BetaPavo20 Pro (DJI O4 Pro) | `DJI04` | DCIM/100MEDIA with SRT files or large 4K files |
-| GoPro Hero 13 | `GP13` | DCIM/100GOPRO folders with GOPR*/GX* files |
+Every card is identified by an `autoUpdater.txt` file at its root — there is no automatic
+detection from file metadata or naming patterns. See [Device Identification](#device-identification-autoupdatertxt) below.
+
+| Device | Folder Name |
+|--------|-------------|
+| DJI Goggles 3 | `GoggleDJI` |
+| DJI Flip | `DJIFlip` |
+| SkyZone Analog FPV Goggles | `GoggleSZ` |
+| BetaPavo20 Pro (DJI O4 Pro) | `DJI04` |
+| GoPro (Hero family, incl. Session 5) | `GP13` |
+| Generic/Other (unrecognized) | `Other` |
 
 ## Output Structure
 
@@ -70,6 +75,9 @@ SDCardImporter
 # Watch mode - continuously monitor for SD cards
 SDCardImporter -w
 
+# Watch mode - identify inserted card type only (no copy)
+SDCardImporter -c
+
 # Custom destination with auto-confirm
 SDCardImporter -d /mnt/footage -y
 
@@ -83,6 +91,7 @@ SDCardImporter -d C:\Footage -w -y
 |--------|-------------|
 | `-d, --destination <path>` | Set the destination folder (default: Documents/FPVFootage) |
 | `-w, --watch` | Watch mode: continuously monitor for SD card insertions |
+| `-c, --card-watch` | Watch removable media and identify inserted card/device type only (no copy) |
 | `-q, --quiet` | Quiet mode: minimal output |
 | `-y, --yes` | Auto-confirm: don't ask before copying |
 | `-h, --help` | Show help message |
@@ -177,29 +186,14 @@ sudo systemctl enable sdcard-importer
 sudo systemctl start sdcard-importer
 ```
 
-## Device Detection Logic
+## Device Identification (autoUpdater.txt)
 
-### DJI Goggles 3 / Generic DJI
-- Has `DCIM` folder
-- Contains `100MEDIA`, `101MEDIA`, etc. subfolders
-- Files named `DJI_XXXX.MP4`, `DJI_XXXX.JPG`
-- Smaller file sizes (DVR quality feed)
+Every card is identified by a file named `autoUpdater.txt` in the **root** of the SD card (same level as `DCIM`). The first non-empty line is used to identify the device for display and for destination routing:
 
-### BetaPavo20 Pro (DJI O4 Pro)
-- Same folder structure as DJI Goggles
-- Contains `.SRT` subtitle files (GPS data)
-- Larger file sizes (4K60 recordings)
+- Use a **folder code** for an exact match: `GoggleDJI`, `DJIFlip`, `GoggleSZ`, `DJI04`, `GP13`, or `Other`.
+- Or write a **free-form** line (for example `GoPro Hero Session 5`); the importer maps common phrases to the same device types, and still shows your exact line as the device name.
 
-### GoPro Hero 13
-- Has `DCIM` folder
-- Contains `100GOPRO`, `101GOPRO`, etc. subfolders
-- Files named `GOPRXXXX.MP4`, `GXNNNNNN.MP4`, `GHNNNNNN.MP4`
-
-### SkyZone Analog Goggles
-- No `DCIM` folder
-- `.MOV` or `.AVI` files in root directory
-- May have `VIDEO` folder with recordings
-- H264 encoded DVR recordings
+If `autoUpdater.txt` is missing or empty when a card is scanned in an interactive console session, the importer prompts for a device name and writes it to `autoUpdater.txt` on the card, so the card is remembered on future imports. In unattended contexts (desktop app, or watch mode with redirected/no console input) the card is skipped with "Could not identify device type" until `autoUpdater.txt` is added.
 
 ## License
 

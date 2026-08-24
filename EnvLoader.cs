@@ -8,12 +8,27 @@ public static class EnvLoader
 {
     public static void Load()
     {
-        var paths = new[]
+        var paths = new List<string>
         {
             Path.Combine(AppContext.BaseDirectory, ".env"),
             Path.Combine(Directory.GetCurrentDirectory(), ".env")
         };
-        foreach (var path in paths)
+        // On Linux, also try executable's directory (when launched from .desktop or systemd, cwd may be wrong)
+        if (OperatingSystem.IsLinux())
+        {
+            try
+            {
+                var exePath = Environment.ProcessPath ?? "";
+                if (!string.IsNullOrEmpty(exePath))
+                {
+                    var exeDir = Path.GetDirectoryName(exePath);
+                    if (!string.IsNullOrEmpty(exeDir))
+                        paths.Add(Path.Combine(exeDir, ".env"));
+                }
+            }
+            catch { /* ignore */ }
+        }
+        foreach (var path in paths.Distinct())
         {
             if (!File.Exists(path)) continue;
             try

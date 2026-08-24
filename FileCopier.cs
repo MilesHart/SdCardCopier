@@ -12,6 +12,10 @@ public class FileCopier
     private const double ProgressUpdateIntervalSeconds = 5.0;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceExW(string lpDirectoryName, out ulong lpFreeBytesAvailableToCaller, out ulong lpTotalNumberOfBytes, out ulong lpTotalNumberOfFreeBytes);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool CopyFileEx(
         string lpExistingFileName,
         string lpNewFileName,
@@ -47,13 +51,52 @@ public class FileCopier
     private readonly bool _verbose;
     private readonly bool _overwriteAll;
     private readonly DateTime? _skyZoneLogDate;
+    private readonly DateTime? _defaultDate;
+    private readonly Action<int, int, long, long, string, bool>? _onProgress;
+    private readonly Action<string, bool>? _onFileComplete;
+    private readonly bool _deleteSkipped;
+    private readonly bool _skipSpaceCheck;
+    private readonly bool _dryRun;
 
-    public FileCopier(string destinationRoot, bool verbose = true, bool overwriteAll = false, DateTime? skyZoneLogDate = null)
+    public FileCopier(string destinationRoot, bool verbose = true, bool overwriteAll = false, DateTime? skyZoneLogDate = null, DateTime? defaultDate = null, Action<int, int, long, long, string, bool>? onProgress = null, Action<string, bool>? onFileComplete = null, bool deleteSkipped = false, bool skipSpaceCheck = false, bool dryRun = false)
     {
         _destinationRoot = destinationRoot;
         _verbose = verbose;
         _overwriteAll = overwriteAll;
         _skyZoneLogDate = skyZoneLogDate;
+        _defaultDate = defaultDate;
+        _onProgress = onProgress;
+        _onFileComplete = onFileComplete;
+        _deleteSkipped = deleteSkipped;
+        _skipSpaceCheck = skipSpaceCheck;
+        _dryRun = dryRun;
+    }
+
+    private enum CopyPlanKind
+    {
+        Copy,
+        SkipDuplicate,
+        CopyUnique
+    }
+
+    private sealed class CopyPlan
+    {
+        public required string SourcePath { get; init; }
+        public required DeviceType DeviceType { get; init; }
+        public required string FolderName { get; init; }
+        public required DateTime FileDate { get; init; }
+        public required string DateSource { get; init; }
+        public required string DestFolder { get; init; }
+        public required string DestFile { get; init; }
+        public required CopyPlanKind Kind { get; init; }
+    }
+
+    public sealed class CopyPreviewItem
+    {
+        public required string SourcePath { get; init; }
+        public required string DestFolder { get; init; }
+        public required string DestFile { get; init; }
+        public required bool WillCopy { get; init; }
     }
 
     /// <summary>
@@ -86,12 +129,24 @@ public class FileCopier
 
         var totalBytes = filesToCopy.Sum(f => new FileInfo(f).Length);
         const long marginBytes = 100L * 1024 * 1024; // 100 MB margin
-        var freeSpace = GetAvailableFreeSpaceForPath(_destinationRoot);
-        if (freeSpace.HasValue && freeSpace.Value < totalBytes + marginBytes)
+        if (!_skipSpaceCheck)
         {
-            result.Errors.Add($"Not enough space on destination. Need {FormatBytes(totalBytes + marginBytes)}, available {FormatBytes(freeSpace.Value)}. Free some space and try again.");
-            return result;
+            var freeSpace = GetAvailableFreeSpaceForPath(_destinationRoot);
+            if (freeSpace.HasValue && freeSpace.Value < totalBytes + marginBytes)
+            {
+                var msg = $"Not enough space on destination. Need {FormatBytes(totalBytes + marginBytes)}, available {FormatBytes(freeSpace.Value)}. Free some space and try again.";
+                if (_dryRun)
+                    result.Errors.Add(msg);
+                else
+                {
+                    result.Errors.Add(msg);
+                    return result;
+                }
+            }
         }
+
+        if (_dryRun)
+            return DryRunCopyFiles(detection, filesToCopy, totalBytes, result);
 
         long bytesCopiedSoFar = 0;
         var fileIndex = 0;
@@ -103,9 +158,7 @@ public class FileCopier
         {
             try
             {
-                // For DJI cards, check each file's metadata to route Flip vs O4 Pro correctly
-                var deviceTypeForFile = GetDeviceTypeForFile(sourceFile, detection.DeviceType);
-                var copied = CopyFile(sourceFile, deviceTypeForFile, result, totalBytes, ref bytesCopiedSoFar, ++fileIndex, filesToCopy.Count, copyStartTick, ref lastBytesForCurrentRate, ref lastRateTick);
+                var copied = CopyFile(sourceFile, detection.DeviceType, detection.GetFolderName(), result, totalBytes, ref bytesCopiedSoFar, ++fileIndex, filesToCopy.Count, copyStartTick, ref lastBytesForCurrentRate, ref lastRateTick);
                 if (copied)
                 {
                     result.FilesCopied++;
@@ -115,10 +168,7 @@ public class FileCopier
             catch (Exception ex)
             {
                 result.Errors.Add($"Error copying {sourceFile}: {ex.Message}");
-                if (IsOutOfSpaceError(ex))
-                {
-                    result.Errors.Add("Destination ran out of space. Free some space and try again.");
-                }
+                // Don't add "Destination ran out of space" - network/Samba paths often misreport, causing false alarms.
             }
         }
 
@@ -130,12 +180,105 @@ public class FileCopier
         return result;
     }
 
+    /// <summary>
+    /// Builds copy preview items using the same routing/duplicate logic as real copy mode.
+    /// </summary>
+    public List<CopyPreviewItem> BuildCopyPreview(DeviceDetectionResult detection)
+    {
+        var preview = new List<CopyPreviewItem>();
+        if (detection.DeviceType == DeviceType.Unknown)
+            return preview;
+
+        var folderName = detection.GetFolderName();
+        var filesToCopy = GatherMediaFiles(detection);
+        foreach (var sourceFile in filesToCopy)
+        {
+            var plan = BuildCopyPlan(sourceFile, detection.DeviceType, folderName);
+            preview.Add(new CopyPreviewItem
+            {
+                SourcePath = sourceFile,
+                DestFolder = plan.DestFolder,
+                DestFile = plan.DestFile,
+                WillCopy = plan.Kind != CopyPlanKind.SkipDuplicate
+            });
+        }
+
+        return preview;
+    }
+
+    private CopyResult DryRunCopyFiles(DeviceDetectionResult detection, List<string> filesToCopy, long totalBytes, CopyResult result)
+    {
+        result.DryRun = true;
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("  SAFE MODE — preview only (no copy, no delete)");
+        Console.ResetColor();
+        Console.WriteLine();
+
+        var folderName = detection.GetFolderName();
+        var index = 0;
+        foreach (var sourceFile in filesToCopy)
+        {
+            index++;
+            var plan = BuildCopyPlan(sourceFile, detection.DeviceType, folderName);
+            var fileInfo = new FileInfo(sourceFile);
+            string action;
+            switch (plan.Kind)
+            {
+                case CopyPlanKind.SkipDuplicate:
+                    action = "skip (duplicate, same size)";
+                    break;
+                case CopyPlanKind.CopyUnique:
+                    action = "copy (rename — destination exists, different size)";
+                    break;
+                default:
+                    {
+                        var canonical = Path.Combine(plan.DestFolder, fileInfo.Name);
+                        var overwrite = File.Exists(canonical) && string.Equals(plan.DestFile, canonical, StringComparison.OrdinalIgnoreCase) && _overwriteAll;
+                        action = overwrite ? "copy (overwrite existing)" : "copy";
+                        break;
+                    }
+            }
+
+            var deleteNote = plan.Kind == CopyPlanKind.SkipDuplicate
+                ? (_deleteSkipped ? "would delete source (+ companions if present)" : "no")
+                : "after copy: optional prompt to delete from source (not automatic)";
+
+            Console.WriteLine($"  [{index}/{filesToCopy.Count}] {fileInfo.Name}");
+            Console.WriteLine($"      Source:      {sourceFile}");
+            Console.WriteLine($"      Action:      {action}");
+            Console.WriteLine($"      Destination: {plan.DestFile}");
+            Console.WriteLine($"      Date folder: {plan.FileDate:yyyy-MM-dd} ({plan.DateSource})");
+            Console.WriteLine($"      Device:      {plan.FolderName}");
+            Console.WriteLine($"      Delete:      {deleteNote}");
+            Console.WriteLine();
+
+            if (plan.Kind == CopyPlanKind.SkipDuplicate)
+                result.FilesSkipped++;
+            else
+            {
+                result.FilesCopied++;
+                result.BytesCopied += fileInfo.Length;
+            }
+        }
+
+        if (result.Errors.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            foreach (var e in result.Errors)
+                Console.WriteLine($"  Warning: {e}");
+            Console.ResetColor();
+        }
+
+        return result;
+    }
+
     private List<string> GatherMediaFiles(DeviceDetectionResult detection)
     {
         var files = new HashSet<string>(detection.MediaFiles, StringComparer.OrdinalIgnoreCase);
         
         // Also scan for additional media files in standard locations
-        var extensions = new[] { ".mp4", ".mov", ".avi", ".jpg", ".jpeg", ".dng", ".lrv", ".thm", ".srt", ".png", ".m4v", ".mkv" };
+        var extensions = new[] { ".mp4", ".mov", ".avi", ".jpg", ".jpeg", ".dng", ".lrv", ".lrf", ".lfd", ".thm", ".srt", ".png", ".m4v", ".mkv" };
         
         // Check DCIM folder recursively
         var dcimPath = Path.Combine(detection.RootPath, "DCIM");
@@ -262,67 +405,100 @@ public class FileCopier
             }
         }
 
+        // Add companion files: for each file, include any same-dir same-base-name with supporting extensions
+        var companionExtensions = new[] { ".lrv", ".lrf", ".lfd", ".thm", ".srt" };
+        var toAdd = new List<string>();
+        foreach (var file in files)
+        {
+            var dir = Path.GetDirectoryName(file);
+            var baseName = Path.GetFileNameWithoutExtension(file);
+            if (string.IsNullOrEmpty(dir)) continue;
+            foreach (var ext in companionExtensions)
+            {
+                var companion = Path.Combine(dir, baseName + ext);
+                if (File.Exists(companion) && !files.Contains(companion))
+                    toAdd.Add(companion);
+            }
+        }
+        foreach (var f in toAdd) files.Add(f);
+
         return files.ToList();
     }
 
-    /// <summary>
-    /// Gets the device type for a specific file. For DJI video files, checks metadata to distinguish Flip vs O4 Pro.
-    /// </summary>
-    private static DeviceType GetDeviceTypeForFile(string sourceFile, DeviceType cardLevelDevice)
-    {
-        var ext = Path.GetExtension(sourceFile).ToLowerInvariant();
-        if (ext is ".mp4" or ".mov" or ".m4v")
-        {
-            var fileDevice = DjiMetadataReader.DetectFromFile(sourceFile);
-            if (fileDevice == DeviceType.DJIFlip || fileDevice == DeviceType.BetaPavo20Pro)
-            {
-                return fileDevice;
-            }
-        }
-        return cardLevelDevice;
-    }
-
-    private bool CopyFile(string sourceFile, DeviceType deviceType, CopyResult result, long totalBytes, ref long bytesCopiedSoFar, int fileIndex, int totalFiles, long copyStartTick, ref long lastBytesForCurrentRate, ref long lastRateTick)
+    private CopyPlan BuildCopyPlan(string sourceFile, DeviceType deviceType, string folderName)
     {
         var fileInfo = new FileInfo(sourceFile);
-        
-        // For SkyZone (GoggleSZ), use the user-provided log date when set; otherwise use file date
-        var fileDate = (deviceType == DeviceType.SkyZoneAnalog && _skyZoneLogDate.HasValue)
-            ? _skyZoneLogDate.Value
-            : GetFileDate(fileInfo);
-        
-        // Build destination path: /{year}/{month}/{day}/{DeviceFolder}/ (month as Jan, Feb, etc.)
+        var (fileDate, dateSource) = GetFileDateWithSource(fileInfo, deviceType);
         var destFolder = Path.Combine(
             _destinationRoot,
             fileDate.Year.ToString(),
             fileDate.ToString("MMM"),
             fileDate.Day.ToString("D2"),
-            deviceType.GetFolderName()
+            folderName
         );
 
-        // Ensure destination folder exists
-        Directory.CreateDirectory(destFolder);
-
         var destFile = Path.Combine(destFolder, fileInfo.Name);
+        CopyPlanKind kind;
 
-        // Check if file already exists: skip (unless overwrite), or get unique name for different-sized file
         if (File.Exists(destFile))
         {
             var existingInfo = new FileInfo(destFile);
             if (existingInfo.Length == fileInfo.Length && !_overwriteAll)
-            {
-                bytesCopiedSoFar += fileInfo.Length;
-                if (_verbose)
-                {
-                    UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: true, copyStartTick);
-                }
-                result.FilesSkipped++;
-                return false;
-            }
-            if (!_overwriteAll)
+                kind = CopyPlanKind.SkipDuplicate;
+            else if (!_overwriteAll)
             {
                 destFile = GetUniqueFilePath(destFile);
+                kind = CopyPlanKind.CopyUnique;
             }
+            else
+                kind = CopyPlanKind.Copy;
+        }
+        else
+            kind = CopyPlanKind.Copy;
+
+        return new CopyPlan
+        {
+            SourcePath = sourceFile,
+            DeviceType = deviceType,
+            FolderName = folderName,
+            FileDate = fileDate,
+            DateSource = dateSource,
+            DestFolder = destFolder,
+            DestFile = destFile,
+            Kind = kind
+        };
+    }
+
+    private bool CopyFile(string sourceFile, DeviceType deviceType, string folderName, CopyResult result, long totalBytes, ref long bytesCopiedSoFar, int fileIndex, int totalFiles, long copyStartTick, ref long lastBytesForCurrentRate, ref long lastRateTick)
+    {
+        var fileInfo = new FileInfo(sourceFile);
+        var plan = BuildCopyPlan(sourceFile, deviceType, folderName);
+        Directory.CreateDirectory(plan.DestFolder);
+        var destFile = plan.DestFile;
+
+        if (plan.Kind == CopyPlanKind.SkipDuplicate)
+        {
+            bytesCopiedSoFar += fileInfo.Length;
+            if (_verbose)
+            {
+                UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: true, copyStartTick);
+            }
+            _onProgress?.Invoke(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, true);
+            _onFileComplete?.Invoke(fileInfo.Name, true);
+            result.FilesSkipped++;
+            if (_deleteSkipped)
+            {
+                try
+                {
+                    DeleteSourceFileAndCompanions(sourceFile);
+                    result.FilesSkippedAndDeleted++;
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to delete skipped file {sourceFile}: {ex.Message}");
+                }
+            }
+            return false;
         }
 
         // Copy the file
@@ -330,6 +506,7 @@ public class FileCopier
         {
             UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTick, lastBytesForCurrentRate, lastRateTick);
         }
+        _onProgress?.Invoke(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, false);
 
         var prevBytes = lastBytesForCurrentRate;
         var prevTick = lastRateTick;
@@ -355,29 +532,55 @@ public class FileCopier
         {
             UpdateProgressBar(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, skipped: false, copyStartTick, prevBytes, prevTick);
         }
-        
+        _onProgress?.Invoke(fileIndex, totalFiles, bytesCopiedSoFar, totalBytes, fileInfo.Name, false);
+
         // Preserve file timestamps
         File.SetCreationTime(destFile, fileInfo.CreationTime);
         File.SetLastWriteTime(destFile, fileInfo.LastWriteTime);
 
+        _onFileComplete?.Invoke(fileInfo.Name, false);
         return true;
     }
 
-    private DateTime GetFileDate(FileInfo fileInfo)
+    private (DateTime Date, string Source) GetFileDateWithSource(FileInfo fileInfo, DeviceType deviceType)
     {
-        // Try to get the most accurate date from the file
-        // Priority: Creation time, then Last Write time
-        var dates = new[]
-        {
-            fileInfo.CreationTime,
-            fileInfo.LastWriteTime
-        };
+        if (deviceType == DeviceType.SkyZoneAnalog && _skyZoneLogDate.HasValue)
+            return (_skyZoneLogDate.Value, "SkyZone log date");
 
-        // Return the earliest reasonable date (not year 1601 which is Windows default for missing timestamps)
-        return dates
-            .Where(d => d.Year > 2000)
-            .OrderBy(d => d)
-            .FirstOrDefault(DateTime.Now);
+        // DJI Goggles 3 (and similar) use short names like DJI_0001.MOV — no date in the name; see video metadata below.
+        if (TryParseDateFromFileName(fileInfo.Name, out var parsedDate))
+            return (parsedDate, "filename");
+
+        if (VideoMetadataReader.GetCreationDate(fileInfo.FullName) is { } metaDate)
+            return (metaDate, "video metadata");
+
+        var fileSystemDate = fileInfo.CreationTime;
+        if (fileSystemDate.Year >= 2000 && fileSystemDate.Year <= 2100)
+            return (fileSystemDate, "file creation time");
+
+        var preset = _defaultDate ?? DateTime.Now;
+        return (preset, _defaultDate.HasValue ? "preset (--date)" : "default (now)");
+    }
+
+    /// <summary>
+    /// Tries to extract YYYYMMDD from filenames when the first 8 characters after "DJI_" are a calendar date.
+    /// DJI Goggles 3 files are typically <c>DJI_0001.MOV</c> (sequence only) — this does not match; use <see cref="VideoMetadataReader"/> instead.
+    /// Some other DJI devices use long names like <c>DJI_20260320202017_0067_D.MP4</c> where YYYYMMDD is embedded.
+    /// </summary>
+    private static bool TryParseDateFromFileName(string fileName, out DateTime date)
+    {
+        date = default;
+        if (string.IsNullOrEmpty(fileName)) return false;
+
+        // Long-form DJI name: DJI_20260320... -> parse yyyyMMdd at position 4 (not DJI_0001.MOV)
+        if (fileName.StartsWith("DJI_", StringComparison.OrdinalIgnoreCase) && fileName.Length >= 12)
+        {
+            if (DateTime.TryParseExact(fileName.Substring(4, 8), "yyyyMMdd", null, System.Globalization.DateTimeStyles.None, out date)
+                && date.Year > 2000 && date.Year < 2100)
+                return true;
+        }
+
+        return false;
     }
 
     private static void UpdateProgressBar(int fileIndex, int totalFiles, long bytesCopied, long totalBytes, string fileName, bool skipped, long copyStartTick, long lastBytesForCurrentRate = 0, long lastRateTick = 0)
@@ -459,26 +662,48 @@ public class FileCopier
     private static long? GetAvailableFreeSpaceForPath(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
-        path = Path.GetFullPath(path.Trim());
+        path = path.Trim();
         try
         {
             if (OperatingSystem.IsWindows())
             {
-                var root = Path.GetPathRoot(path);
-                if (string.IsNullOrEmpty(root)) return null;
-                var drive = new DriveInfo(root);
-                if (!drive.IsReady) return null;
-                return drive.AvailableFreeSpace;
+                var fullPath = Path.GetFullPath(path);
+                // GetDiskFreeSpaceExW works with UNC paths (\\server\share); DriveInfo does not
+                if (GetDiskFreeSpaceExW(fullPath, out var freeBytes, out _, out _))
+                    return (long)freeBytes;
+                var root = Path.GetPathRoot(fullPath);
+                if (string.IsNullOrEmpty(root) || fullPath.StartsWith("\\\\")) return null;
+                try
+                {
+                    var drive = new DriveInfo(root);
+                    if (!drive.IsReady) return null;
+                    return drive.AvailableFreeSpace;
+                }
+                catch { return null; }
             }
             if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
             {
-                // df -k reports in 1K blocks; parse "Available" (4th column)
+                // Windows UNC (\\server\share) can resolve to wrong volume via GetFullPath; normalize for Samba
+                var dfPath = path.Replace('\\', '/');
+                if (dfPath.StartsWith("//"))
+                {
+                    // Network path: must exist or df reports wrong filesystem (e.g. root)
+                    if (!Directory.Exists(dfPath))
+                        return null;
+                }
+                else
+                {
+                    dfPath = Path.GetFullPath(path);
+                    // If path doesn't exist, df may report wrong volume (e.g. Pi root); skip
+                    if (!Directory.Exists(dfPath))
+                        return null;
+                }
                 using var proc = new Process
                 {
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = "df",
-                        ArgumentList = { "-k", path },
+                        ArgumentList = { "-k", dfPath },
                         RedirectStandardOutput = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
@@ -516,6 +741,21 @@ public class FileCopier
         return msg.Contains("No space left on device", StringComparison.OrdinalIgnoreCase)
             || msg.Contains("ENOSPC", StringComparison.OrdinalIgnoreCase)
             || msg.Contains("not enough space", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Deletes the file and any companion .LRV/.LRF/.LFD files (same base name in same directory).</summary>
+    public static void DeleteSourceFileAndCompanions(string path)
+    {
+        if (!File.Exists(path)) return;
+        File.Delete(path);
+        var dir = Path.GetDirectoryName(path);
+        var baseName = Path.GetFileNameWithoutExtension(path);
+        if (string.IsNullOrEmpty(dir)) return;
+        foreach (var ext in new[] { ".lrv", ".lrf", ".lfd" })
+        {
+            var companion = Path.Combine(dir, baseName + ext);
+            try { if (File.Exists(companion)) File.Delete(companion); } catch { /* best effort */ }
+        }
     }
 
     private static bool CopyFileWithProgressEx(string sourceFile, string destFile, long bytesBeforeThisFile, int fileIndex, int totalFiles, long totalBytes, string fileName, long copyStartTick)
@@ -592,11 +832,15 @@ public class FileCopier
 /// </summary>
 public class CopyResult
 {
+    /// <summary>True when <c>--safe</c> mode ran a preview with no copy/delete.</summary>
+    public bool DryRun { get; set; }
+
     public DeviceType DeviceType { get; set; }
     public string SourcePath { get; set; } = "";
     public int TotalFiles { get; set; }
     public int FilesCopied { get; set; }
     public int FilesSkipped { get; set; }
+    public int FilesSkippedAndDeleted { get; set; }
     public long BytesCopied { get; set; }
     public List<string> Errors { get; set; } = new();
     /// <summary>Source file paths that were successfully copied (for optional delete-after-copy).</summary>
