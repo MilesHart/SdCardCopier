@@ -25,8 +25,8 @@ Files are copied to:
 
 Example:
 ```
-C:\Users\mhart\Documents\FPVFootage\2026\Feb\16\GoggleDJI\DJI_0001.MP4
-C:\Users\mhart\Documents\FPVFootage\2026\Feb\16\GP13\GOPR0001.MP4
+\\dazzle.local\root\fpv\2026\Feb\16\GoggleDJI\DJI_0001.MP4
+\\dazzle.local\root\fpv\2026\Feb\16\GP13\GOPR0001.MP4
 ```
 
 ## Installation
@@ -89,7 +89,7 @@ SDCardImporter -d C:\Footage -w -y
 
 | Option | Description |
 |--------|-------------|
-| `-d, --destination <path>` | Set the destination folder (default: Documents/FPVFootage) |
+| `-d, --destination <path>` | Set the destination folder (default: `\\dazzle.local\root\fpv`) |
 | `-w, --watch` | Watch mode: continuously monitor for SD card insertions |
 | `-c, --card-watch` | Watch removable media and identify inserted card/device type only (no copy) |
 | `-q, --quiet` | Quiet mode: minimal output |
@@ -105,14 +105,14 @@ After each card copy completes, a short summary can be sent to Telegram (MiloEve
 ### Windows
 - Uses WMI to detect **USB-connected drives** (including USB SD card adapters)
 - Falls back to all removable drives if WMI is unavailable
-- Files are copied to `Documents\FPVFootage` by default
+- Files are copied to `\\dazzle.local\root\fpv` by default
 
 ### Linux (including Raspberry Pi)
 - Detects USB storage via `/sys/block` and `/proc/mounts`
 - Monitors `/media`, `/mnt`, and `/run/media/{username}` for mounted drives
 - Includes both USB SD adapters and built-in SD slots (mmcblk)
 - For Raspberry Pi, ensure the SD card auto-mounts (usually handled by desktop environments)
-- Files are copied to `~/FPVFootage` by default
+- Files are copied to `\\dazzle.local\root\fpv` by default (on Pi, mount the share and set `DESTINATION_PATH` to the mount point if UNC is unavailable)
 
 ### USB SD Adapters
 - **Watch mode** waits for USB drives to become ready before processing (USB devices can take a moment after connection)

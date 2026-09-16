@@ -309,7 +309,7 @@ class Program
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  -d, --destination <path>  Set the destination root folder for copied files");
-        Console.WriteLine("                            Default: DESTINATION_PATH in .env, or ~/FPVFootage (Linux) / Documents\\FPVFootage (Windows)");
+        Console.WriteLine("                            Default: DESTINATION_PATH in .env, or \\\\dazzle.local\\\\root\\\\fpv");
         Console.WriteLine("                            UNC (\\\\server\\\\share), //server/share, or DriveType.Network paths must exist; never auto-created.");
         Console.WriteLine("  -w, --watch               Watch mode: continuously monitor for SD card insertions");
         Console.WriteLine("  -c, --card-watch          Watch removable media and only identify inserted card type (no copy)");
@@ -641,9 +641,7 @@ class Program
 
     internal static string GetDefaultDestinationPath()
     {
-        if (OperatingSystem.IsWindows())
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "FPVFootage");
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "FPVFootage");
+        return @"\\dazzle.local\root\fpv";
     }
 
     internal static async Task<int> RunWatchMode(CancellationToken appCancellation = default)

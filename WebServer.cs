@@ -400,7 +400,7 @@ public class WebServer
           <div class="tip tip-pi">
             <p><strong>Raspberry Pi (Linux ARM)</strong></p>
             <ul>
-              <li>Default destination if unset: <span class="mono">~/FPVFootage</span></li>
+              <li>Default destination if unset: <span class="mono">\\dazzle.local\root\fpv</span></li>
               <li>Drives under <span class="mono">/media</span>, <span class="mono">/mnt</span>, <span class="mono">/run/media/…</span></li>
               <li>Network shares must be mounted first; point <span class="mono">DESTINATION_PATH</span> at the mount (not a dead UNC path).</li>
               <li>Watch mode waits for USB drives to become ready after insert.</li>
@@ -409,7 +409,7 @@ public class WebServer
           <div class="tip tip-windows">
             <p><strong>Windows PC</strong></p>
             <ul>
-              <li>Default destination: <span class="mono">Documents\FPVFootage</span></li>
+              <li>Default destination: <span class="mono">\\dazzle.local\root\fpv</span></li>
               <li>USB SD adapters detected via WMI; falls back to removable drives.</li>
             </ul>
           </div>
